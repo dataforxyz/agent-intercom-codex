@@ -1,7 +1,7 @@
 {
   "name": "codex-intercom",
   "version": "0.1.0",
-  "description": "Codex MCP plugin for direct local messaging with Pi and Codex coding-agent sessions.",
+  "description": "Codex MCP plugin and bridge daemon for local Pi/Codex intercom messaging.",
   "author": {
     "name": "dataforxyz",
     "email": "support@datafor.xyz",
@@ -22,7 +22,7 @@
   "interface": {
     "displayName": "Codex Intercom",
     "shortDescription": "Coordinate local Codex and Pi sessions",
-    "longDescription": "Codex Intercom provides direct 1:1 local messaging for coding-agent sessions through MCP tools for listing sessions, sending messages, asking questions, replying to pending asks, and checking pending messages.",
+    "longDescription": "Codex Intercom provides direct 1:1 local messaging for coding-agent sessions through MCP tools, plus an optional Codex app-server bridge that exposes wake-on-message virtual workers backed by persistent app-server threads.",
     "developerName": "dataforxyz",
     "category": "Developer Tools",
     "capabilities": [

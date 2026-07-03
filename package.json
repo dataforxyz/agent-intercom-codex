@@ -18,7 +18,8 @@
   ],
   "scripts": {
     "codex:mcp": "tsx codex/server.ts",
-    "test": "tsx --test broker/client.test.ts broker/framing.test.ts broker/paths.test.ts broker/spawn.test.ts codex/runtime.test.ts codex/mcp-protocol.test.ts"
+    "codex:bridge": "tsx codex/bridge-daemon.ts",
+    "test": "tsx --test broker/client.test.ts broker/framing.test.ts broker/paths.test.ts broker/spawn.test.ts codex/*.test.ts"
   },
   "keywords": [
     "codex",

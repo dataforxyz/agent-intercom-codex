@@ -15,6 +15,11 @@ Codex MCP does not currently provide Pi-style unsolicited turn wake-up. Incoming
 messages are queued while this MCP server is running; call `intercom_pending`
 to read unread messages and unresolved asks.
 
+For wake-on-message workflows, run the app-server bridge daemon. It publishes
+configured virtual Codex workers as intercom sessions. Messages sent to those
+workers create or resume Codex app-server threads and start a turn; blocking
+asks are answered with the worker's final assistant message.
+
 ## Tools
 
 - `intercom_whoami`
@@ -76,6 +81,58 @@ That means a local checkout currently needs `npm install` before Codex starts
 the MCP server. A later package build can ship compiled JavaScript or a bin
 entrypoint.
 
+## App-Server Bridge
+
+Use the bridge when the receiver should not have to keep an interactive Codex
+turn open just to notice messages.
+
+Create a bridge config:
+
+```json
+{
+  "statePath": "/home/you/.pi/agent/intercom/codex-bridge-state.json",
+  "agents": [
+    {
+      "id": "codex-worker",
+      "name": "codex-worker",
+      "cwd": "/home/you/src/project",
+      "model": "gpt-5.5",
+      "instructions": "Reply concisely. Ask before making destructive changes."
+    }
+  ]
+}
+```
+
+Start it:
+
+```bash
+npm run codex:bridge -- --config /home/you/.pi/agent/intercom/codex-bridge.json
+```
+
+Then other local sessions can target `codex-worker` with `intercom_send` or
+`intercom_ask`. The bridge stores each worker's app-server `threadId` in
+`statePath`, so later messages continue the same Codex thread.
+
+By default, bridge turns run with `approvalPolicy: "never"` and read-only,
+network-disabled sandboxing. Override `approvalPolicy` or `sandboxPolicy` in
+the agent config only when you explicitly want a background worker to have more
+authority.
+
+The bridge defaults to spawning `codex app-server` directly. If your Codex
+install supports the managed app-server daemon, you can opt into proxy mode:
+
+```json
+{
+  "appServer": {
+    "startDaemon": true,
+    "args": ["app-server", "proxy"]
+  },
+  "agents": [
+    { "id": "codex-worker", "cwd": "/home/you/src/project" }
+  ]
+}
+```
+
 ## Examples
 
 List sessions:
@@ -124,11 +181,21 @@ intercom_send({
 })
 ```
 
+Wake an app-server-backed virtual worker:
+
+```typescript
+intercom_ask({
+  to: "codex-worker",
+  message: "Please inspect the latest failing test and reply with the likely cause."
+})
+```
+
 ## Relationship To Pi Intercom
 
 `pi-intercom` remains the Pi-native extension with overlays, inline rendering,
 and Pi `triggerTurn` delivery. `codex-intercom` is the Codex MCP/plugin
-adapter.
+adapter plus an optional Codex app-server bridge for wake-on-message virtual
+workers.
 
 For now this repository vendors the minimal local broker/client protocol for
 compatibility. If the protocol stabilizes across multiple adapters, the shared

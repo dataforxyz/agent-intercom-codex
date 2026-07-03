@@ -16,6 +16,10 @@ Inbound messages are queued by the MCP server while it is running. Check
 `intercom_pending` at natural boundaries, before starting delegated work, and
 when you expect a response.
 
+If the user needs wake-on-message behavior, use or recommend the app-server
+bridge daemon. It exposes configured virtual Codex workers as intercom sessions;
+messages to those workers create or resume app-server threads and start turns.
+
 ## Tools
 
 - `intercom_whoami`: show this session's intercom ID, name, cwd, and model.
@@ -77,9 +81,20 @@ intercom_reply({
 })
 ```
 
+Wake a bridge-managed worker:
+
+```typescript
+intercom_ask({
+  to: "codex-worker",
+  message: "Please inspect the failing test and reply with the most likely cause."
+})
+```
+
 ## Boundaries
 
 - Do not assume push delivery into Codex. Check `intercom_pending`.
+- Do not assume a normal MCP session can wake itself from idle. Use the
+  app-server bridge for wake-on-message virtual workers.
 - Do not use `intercom_ask` for passive polling of files, ports, or process
   completion. Use normal shell checks for those.
 - Keep messages concise and include file paths, command output summaries, and
