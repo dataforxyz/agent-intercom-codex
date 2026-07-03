@@ -43,6 +43,21 @@ CODEX_INTERCOM_SESSION_ID=codex-planner
 CODEX_INTERCOM_MODEL=codex
 ```
 
+When Codex launches the MCP server, those variables must be configured on the
+MCP server itself. Per-command variables passed to `codex exec` are not
+forwarded into the MCP server process.
+
+```bash
+codex mcp add codex-planner \
+  --env CODEX_INTERCOM_NAME=planner \
+  --env CODEX_INTERCOM_SESSION_ID=codex-planner \
+  -- npx --no-install tsx /absolute/path/to/codex-intercom/codex/server.ts
+```
+
+For ad hoc multi-Codex runs, the easiest discovery flow is to have the receiver
+call `intercom_set_summary` with a unique role or token, then have the sender
+call `intercom_list` and target the matching session ID.
+
 ## Codex Plugin
 
 This repo includes Codex plugin metadata:
@@ -92,6 +107,21 @@ Check and reply:
 ```typescript
 intercom_pending({ mark_read: false })
 intercom_reply({ message: "Use GET/PUT/DELETE only, max 3 retries." })
+```
+
+Two-Codex handoff pattern:
+
+```typescript
+// Receiver
+intercom_set_summary({ summary: "worker: retry tests" })
+intercom_pending({ mark_read: true })
+
+// Sender
+intercom_list({ scope: "machine", include_self: true })
+intercom_send({
+  to: "codex-session-id-from-list",
+  message: "Retry tests are ready; please check the pending failure."
+})
 ```
 
 ## Relationship To Pi Intercom

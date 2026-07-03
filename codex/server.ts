@@ -10,6 +10,8 @@ const rl = readline.createInterface({
   crlfDelay: Infinity,
 });
 
+let shuttingDown = false;
+
 function writeResponse(response: Record<string, unknown> | undefined): void {
   if (!response) return;
   stdout.write(`${JSON.stringify(response)}\n`);
@@ -36,8 +38,13 @@ rl.on("line", (line) => {
 });
 
 const shutdown = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  rl.close();
   void runtime.disconnect().finally(() => process.exit(0));
 };
 
+rl.on("close", shutdown);
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+process.on("disconnect", shutdown);
