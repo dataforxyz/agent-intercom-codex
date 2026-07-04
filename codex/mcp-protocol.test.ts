@@ -71,6 +71,39 @@ test("tools/call rejects ask timeouts above the interactive maximum", async () =
   assert.match(((response?.result as any).content[0]).text, /intercom_send plus intercom_pending/);
 });
 
+test("notifications/cancelled aborts a matching pending ask", async () => {
+  let observedAbort = false;
+  const runtime = {
+    ...fakeRuntime(),
+    ask: async (_to: string, _message: string, _attachments?: unknown, _timeoutMs?: number, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => {
+        observedAbort = true;
+        reject(new Error("aborted by test"));
+      }, { once: true });
+    }),
+  } as any;
+
+  const pending = handleMcpRequest({
+    id: "ask-1",
+    method: "tools/call",
+    params: {
+      name: "intercom_ask",
+      arguments: { to: "worker", message: "hello" },
+    },
+  }, runtime);
+
+  const cancelResponse = await handleMcpRequest({
+    method: "notifications/cancelled",
+    params: { requestId: "ask-1" },
+  }, runtime);
+  const response = await pending;
+
+  assert.equal(cancelResponse, undefined);
+  assert.equal(observedAbort, true);
+  assert.equal((response?.result as any).isError, true);
+  assert.match(((response?.result as any).content[0]).text, /aborted by test/);
+});
+
 test("tools/call reports validation errors as tool errors", async () => {
   const response = await handleMcpRequest({
     id: 4,

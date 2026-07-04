@@ -167,7 +167,8 @@ intercom_ask({
 
 Blocking asks default to 45 seconds and reject waits over 120 seconds. For
 longer-running work, use `intercom_send` and check later with
-`intercom_pending` instead of blocking the agent turn.
+`intercom_pending` instead of blocking the agent turn. If Codex cancels the
+tool call, the pending ask is cancelled immediately.
 
 Check and reply:
 

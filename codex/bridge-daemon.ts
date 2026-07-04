@@ -19,6 +19,7 @@ interface ToolReplyWaiter {
   resolve: (message: Message) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
+  cleanup?: () => void;
 }
 
 const APPROVED_INTERCOM_TOOLS = new Set([
@@ -293,6 +294,7 @@ export class VirtualCodexAgent {
       if (from.id === toolWaiter.from) {
         this.toolReplyWaiters.delete(message.replyTo ?? "");
         clearTimeout(toolWaiter.timeout);
+        toolWaiter.cleanup?.();
         toolWaiter.resolve(message);
         return Promise.resolve();
       }
@@ -375,16 +377,16 @@ export class VirtualCodexAgent {
     }
   }
 
-  async handleToolCall(name: string, args: Record<string, unknown>, turnId: string | null): Promise<unknown> {
+  async handleToolCall(name: string, args: Record<string, unknown>, turnId: string | null, signal?: AbortSignal): Promise<unknown> {
     try {
-      const result = await this.callIntercomTool(name, args, turnId);
+      const result = await this.callIntercomTool(name, args, turnId, signal);
       return appServerToolResponse(result);
     } catch (error) {
       return appServerToolResponse(textToolResult(error instanceof Error ? error.message : String(error), { ok: false }, true));
     }
   }
 
-  private async callIntercomTool(name: string, args: Record<string, unknown>, turnId: string | null): Promise<ToolResult> {
+  private async callIntercomTool(name: string, args: Record<string, unknown>, turnId: string | null, signal?: AbortSignal): Promise<ToolResult> {
     switch (name) {
       case "intercom_whoami":
         return textToolResult(
@@ -428,7 +430,8 @@ export class VirtualCodexAgent {
         const timeoutMs = asOptionalPositiveInteger(args.timeout_ms, "timeout_ms") ?? DEFAULT_ASK_TIMEOUT_MS;
         const sendTo = await this.resolveTarget(to);
         const questionId = randomUUID();
-        const replyPromise = this.waitForToolReply(sendTo, questionId, timeoutMs);
+        const replyPromise = this.waitForToolReply(sendTo, questionId, timeoutMs, signal);
+        void replyPromise.catch(() => undefined);
         const result = await this.client.send(sendTo, { messageId: questionId, text: message, expectsReply: true });
         if (!result.delivered) {
           this.rejectToolReply(questionId, new Error(result.reason ?? "Session may not exist or has disconnected."));
@@ -469,14 +472,31 @@ export class VirtualCodexAgent {
     return resolveSessionTarget(sessions, to) ?? to;
   }
 
-  private waitForToolReply(from: string, replyTo: string, timeoutMs = DEFAULT_ASK_TIMEOUT_MS): Promise<Message> {
+  private waitForToolReply(from: string, replyTo: string, timeoutMs = DEFAULT_ASK_TIMEOUT_MS, signal?: AbortSignal): Promise<Message> {
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      if (signal?.aborted) {
+        reject(new Error("intercom_ask cancelled"));
+        return;
+      }
+      let timeout: NodeJS.Timeout;
+      const cleanup = () => {
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onAbort = () => {
+        this.toolReplyWaiters.delete(replyTo);
+        cleanup();
+        this.client.cancelAsk(replyTo);
+        reject(new Error("intercom_ask cancelled"));
+      };
+      timeout = setTimeout(() => {
         this.toolReplyWaiters.delete(replyTo);
         this.client.cancelAsk(replyTo);
+        signal?.removeEventListener("abort", onAbort);
         reject(new Error(`No reply from "${from}" within ${Math.round(timeoutMs / 1000)} seconds`));
       }, timeoutMs);
-      this.toolReplyWaiters.set(replyTo, { from, resolve, reject, timeout });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.toolReplyWaiters.set(replyTo, { from, resolve, reject, timeout, cleanup });
     });
   }
 
@@ -484,6 +504,7 @@ export class VirtualCodexAgent {
     const waiter = this.toolReplyWaiters.get(replyTo);
     if (!waiter) return;
     clearTimeout(waiter.timeout);
+    waiter.cleanup?.();
     this.toolReplyWaiters.delete(replyTo);
     waiter.reject(error);
     this.client.cancelAsk(replyTo);
@@ -493,6 +514,7 @@ export class VirtualCodexAgent {
 export class CodexBridgeDaemon {
   private app: CodexAppServerClient;
   private agents: VirtualCodexAgent[] = [];
+  private inflightToolCalls = new Map<string | number, AbortController>();
 
   constructor(private readonly config: BridgeConfig) {
     this.app = new CodexAppServerClient(config.appServer);
@@ -505,6 +527,12 @@ export class CodexBridgeDaemon {
     await this.app.connect();
     const state = loadBridgeState(this.config.statePath);
     this.app.on("notification", (message: JsonRpcMessage) => {
+      if (message.method === "notifications/cancelled" && message.params && typeof message.params === "object") {
+        const requestId = (message.params as Record<string, unknown>).requestId;
+        if (typeof requestId === "string" || typeof requestId === "number") {
+          this.inflightToolCalls.get(requestId)?.abort();
+        }
+      }
       for (const agent of this.agents) agent.onNotification(message);
     });
     this.agents = this.config.agents.map((agent) => new VirtualCodexAgent(agent, this.app, state, this.config.statePath));
@@ -538,7 +566,16 @@ export class CodexBridgeDaemon {
       ? this.agents.find((candidate) => candidate.ownsThread(call.threadId!))
       : this.agents[0];
     if (!agent) return appServerToolResponse(textToolResult("No bridge agent owns this tool call.", { ok: false }, true));
-    return agent.handleToolCall(call.name, call.args, call.turnId);
+    const requestId = message.id;
+    const abortController = typeof requestId === "string" || typeof requestId === "number"
+      ? new AbortController()
+      : null;
+    if (abortController && requestId !== undefined) this.inflightToolCalls.set(requestId, abortController);
+    try {
+      return await agent.handleToolCall(call.name, call.args, call.turnId, abortController?.signal);
+    } finally {
+      if (abortController && requestId !== undefined) this.inflightToolCalls.delete(requestId);
+    }
   }
 }
 

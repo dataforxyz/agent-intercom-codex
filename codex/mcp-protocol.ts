@@ -8,7 +8,8 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>;
 }
 
-type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>;
+type RequestId = string | number;
+type ToolHandler = (args: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolResult>;
 
 interface ToolDefinition {
   name: string;
@@ -16,6 +17,8 @@ interface ToolDefinition {
   inputSchema: Record<string, unknown>;
   handler: ToolHandler;
 }
+
+const inflightToolCalls = new Map<RequestId, AbortController>();
 
 function asString(value: unknown, name: string): string {
   if (typeof value !== "string" || value.trim() === "") {
@@ -133,11 +136,12 @@ export function buildToolDefinitions(runtime: CodexIntercomRuntime): ToolDefinit
         required: ["to", "message"],
         additionalProperties: false,
       },
-      handler: async (args) => runtime.ask(
+      handler: async (args, signal) => runtime.ask(
         asString(args.to, "to"),
         asString(args.message, "message"),
         asAttachmentArray(args.attachments),
         asOptionalPositiveInteger(args.timeout_ms, "timeout_ms"),
+        signal,
       ),
     },
     {
@@ -181,6 +185,14 @@ export async function handleMcpRequest(request: JsonRpcRequest, runtime: CodexIn
     return error(request.id, -32600, "Invalid request");
   }
 
+  if (request.method === "notifications/cancelled") {
+    const requestId = request.params?.requestId;
+    if (typeof requestId === "string" || typeof requestId === "number") {
+      inflightToolCalls.get(requestId)?.abort();
+    }
+    return undefined;
+  }
+
   if (request.id === undefined && request.method.startsWith("notifications/")) {
     return undefined;
   }
@@ -208,11 +220,18 @@ export async function handleMcpRequest(request: JsonRpcRequest, runtime: CodexIn
       }
       const tool = tools.find((candidate) => candidate.name === name);
       if (!tool) return error(request.id, -32602, `Unknown tool: ${name}`);
+      const requestId = request.id;
+      const abortController = typeof requestId === "string" || typeof requestId === "number"
+        ? new AbortController()
+        : null;
+      if (abortController && requestId !== undefined) inflightToolCalls.set(requestId, abortController);
       try {
-        return ok(request.id, await tool.handler((args ?? {}) as Record<string, unknown>));
+        return ok(request.id, await tool.handler((args ?? {}) as Record<string, unknown>, abortController?.signal));
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : String(caught);
         return ok(request.id, { content: [{ type: "text", text: message }], isError: true });
+      } finally {
+        if (abortController && requestId !== undefined) inflightToolCalls.delete(requestId);
       }
     }
     default:

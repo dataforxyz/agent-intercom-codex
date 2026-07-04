@@ -34,6 +34,7 @@ interface ReplyWaiter {
   resolve: (message: Message) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
+  cleanup?: () => void;
 }
 
 function shortHash(value: string): string {
@@ -147,6 +148,7 @@ export class CodexIntercomRuntime {
     client.on("disconnected", (error: Error) => {
       for (const waiter of this.replyWaiters.values()) {
         clearTimeout(waiter.timeout);
+        waiter.cleanup?.();
         waiter.reject(new Error(`Disconnected while waiting for reply: ${error.message}`, { cause: error }));
       }
       this.replyWaiters.clear();
@@ -179,6 +181,7 @@ export class CodexIntercomRuntime {
       if (fromMatches) {
         this.replyWaiters.delete(waiter.replyTo);
         clearTimeout(waiter.timeout);
+        waiter.cleanup?.();
         waiter.resolve(message);
         return;
       }
@@ -191,14 +194,31 @@ export class CodexIntercomRuntime {
     }
   }
 
-  private waitForReply(from: string, replyTo: string, timeoutMs = getAskTimeoutMs()): Promise<Message> {
+  private waitForReply(from: string, replyTo: string, timeoutMs = getAskTimeoutMs(), signal?: AbortSignal): Promise<Message> {
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      if (signal?.aborted) {
+        reject(new Error("intercom_ask cancelled"));
+        return;
+      }
+      let timeout: NodeJS.Timeout;
+      const cleanup = () => {
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onAbort = () => {
+        this.replyWaiters.delete(replyTo);
+        cleanup();
+        this.client?.cancelAsk(replyTo);
+        reject(new Error("intercom_ask cancelled"));
+      };
+      timeout = setTimeout(() => {
         this.replyWaiters.delete(replyTo);
         this.client?.cancelAsk(replyTo);
+        signal?.removeEventListener("abort", onAbort);
         reject(new Error(`No reply from "${from}" within ${Math.round(timeoutMs / 1000)} seconds`));
       }, timeoutMs);
-      this.replyWaiters.set(replyTo, { from, replyTo, resolve, reject, timeout });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.replyWaiters.set(replyTo, { from, replyTo, resolve, reject, timeout, cleanup });
     });
   }
 
@@ -266,11 +286,12 @@ export class CodexIntercomRuntime {
     return textResult(`Message sent to ${to}.`, { ok: true, message_id: result.id, to });
   }
 
-  async ask(to: string, message: string, attachments?: Attachment[], timeoutMs = getAskTimeoutMs()): Promise<ToolResult> {
+  async ask(to: string, message: string, attachments?: Attachment[], timeoutMs = getAskTimeoutMs(), signal?: AbortSignal): Promise<ToolResult> {
     const client = await this.connect();
     const sendTo = await this.resolveTarget(to);
     const questionId = randomUUID();
-    const replyPromise = this.waitForReply(sendTo, questionId, timeoutMs);
+    const replyPromise = this.waitForReply(sendTo, questionId, timeoutMs, signal);
+    void replyPromise.catch(() => undefined);
     try {
       const result = await client.send(sendTo, {
         messageId: questionId,
