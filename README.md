@@ -78,8 +78,7 @@ npx --no-install tsx ./codex/server.ts
 ```
 
 That means a local checkout currently needs `npm install` before Codex starts
-the MCP server. A later package build can ship compiled JavaScript or a bin
-entrypoint.
+the MCP server.
 
 ## App-Server Bridge
 
@@ -199,11 +198,19 @@ intercom_ask({
 ## `coi` Sidecar Launcher
 
 `coi` starts a per-agent Codex app-server socket, registers an intercom sidecar
-for that socket, then launches an interactive Codex UI attached to the same
-socket.
+for that socket, creates or resumes the sidecar's app-server thread, then
+launches an interactive Codex UI attached to that same socket and thread.
 
 ```bash
 npm run coi -- --profile cliproxy
+```
+
+Build or link the installable command:
+
+```bash
+npm run build
+npm link
+coi --profile cliproxy
 ```
 
 Useful sidecar flags:
@@ -215,14 +222,16 @@ npm run coi -- --no-tui --name smoke-worker
 ```
 
 Everything not recognized as a sidecar flag is passed through to `codex
---remote`, so existing profile/model/sandbox flags still work. The sidecar
-inherits `CODEX_HOME`, which means it can be used from either a normal Codex
-environment or an alternate one such as `CODEX_HOME=~/.codex-alt`.
+resume --remote`, so existing profile/model/sandbox flags still work. Prompt
+arguments are placed after the resumed sidecar thread id. The sidecar inherits
+`CODEX_HOME`, which means it can be used from either a normal Codex environment
+or an alternate one such as `CODEX_HOME=~/.codex-alt`.
 
 Current limitation: the sidecar can be messaged while the `coi` process is
 running and will wake an app-server-backed Codex turn. It does not make every
 ordinary `codex` process wakeable; launch the agent through `coi` when you want
-this behavior.
+this behavior. Sidecar-originated intercom sends are capped per turn and per
+minute to prevent unattended ping-pong loops.
 
 ## Relationship To Pi Intercom
 

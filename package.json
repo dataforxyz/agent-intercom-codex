@@ -5,9 +5,14 @@
   "license": "MIT",
   "type": "module",
   "main": "codex/server.ts",
+  "bin": {
+    "coi": "dist/coi.mjs"
+  },
   "files": [
+    "dist/**/*",
     "codex/**/*.ts",
     "broker/**/*.ts",
+    "scripts/**/*",
     "skills/**/*",
     "types.ts",
     "config.ts",
@@ -17,6 +22,8 @@
     "LICENSE"
   ],
   "scripts": {
+    "build": "node scripts/build-coi.mjs",
+    "prepare": "npm run build",
     "codex:mcp": "tsx codex/server.ts",
     "codex:bridge": "tsx codex/bridge-daemon.ts",
     "coi": "tsx codex/coi.ts",
@@ -33,6 +40,7 @@
     "tsx": "^4.20.0"
   },
   "devDependencies": {
+    "esbuild": "^0.28.1",
     "typescript": "^6.0.3"
   }
 }

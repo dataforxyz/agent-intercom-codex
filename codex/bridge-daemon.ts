@@ -31,6 +31,8 @@ const APPROVED_INTERCOM_TOOLS = new Set([
   "intercom_pending",
   "intercom_reply",
 ]);
+const MAX_TOOL_MESSAGES_PER_TURN = 8;
+const MAX_TOOL_MESSAGES_PER_MINUTE = 30;
 
 function formatMessage(from: SessionInfo, message: Message, agent: BridgeAgentConfig): string {
   const replyInstruction = message.expectsReply
@@ -130,7 +132,7 @@ function parseToolArguments(value: unknown): Record<string, unknown> {
   return value;
 }
 
-function extractToolCall(message: JsonRpcMessage): { threadId: string | null; name: string; args: Record<string, unknown> } {
+function extractToolCall(message: JsonRpcMessage): { threadId: string | null; turnId: string | null; name: string; args: Record<string, unknown> } {
   const params = isRecord(message.params) ? message.params : {};
   const nested = ["toolCall", "tool", "call", "item"]
     .map((key) => params[key])
@@ -139,7 +141,8 @@ function extractToolCall(message: JsonRpcMessage): { threadId: string | null; na
   if (typeof rawName !== "string") throw new Error("item/tool/call did not include a tool name");
   const rawArgs = params.arguments ?? params.args ?? params.input ?? nested.arguments ?? nested.args ?? nested.input;
   const threadId = typeof params.threadId === "string" ? params.threadId : null;
-  return { threadId, name: normalizeToolName(rawName), args: parseToolArguments(rawArgs) };
+  const turnId = typeof params.turnId === "string" ? params.turnId : null;
+  return { threadId, turnId, name: normalizeToolName(rawName), args: parseToolArguments(rawArgs) };
 }
 
 function textToolResult(text: string, structuredContent?: Record<string, unknown>, isError = false): ToolResult {
@@ -168,6 +171,8 @@ export class VirtualCodexAgent {
   private messageQueue: Promise<void> = Promise.resolve();
   private idleWaiters: Array<() => void> = [];
   private turnCompletionWaiters = new Map<string, Array<() => void>>();
+  private toolMessageCountsByTurn = new Map<string, number>();
+  private toolMessageTimestamps: number[] = [];
 
   constructor(
     private readonly agent: BridgeAgentConfig,
@@ -200,6 +205,10 @@ export class VirtualCodexAgent {
 
   async stop(): Promise<void> {
     await this.client.disconnect();
+  }
+
+  get id(): string {
+    return this.agent.id;
   }
 
   ownsThread(threadId: string): boolean {
@@ -240,7 +249,7 @@ export class VirtualCodexAgent {
     }
   }
 
-  private async ensureThread(): Promise<string> {
+  async ensureThread(): Promise<string> {
     if (this.threadId) {
       try {
         await this.app.request("thread/resume", {
@@ -354,22 +363,23 @@ export class VirtualCodexAgent {
     } finally {
       this.finalMessages.delete(turnId);
       this.waiters.delete(turnId);
+      this.toolMessageCountsByTurn.delete(turnId);
       const waiters = this.turnCompletionWaiters.get(turnId) ?? [];
       this.turnCompletionWaiters.delete(turnId);
       for (const resolve of waiters) resolve();
     }
   }
 
-  async handleToolCall(name: string, args: Record<string, unknown>): Promise<unknown> {
+  async handleToolCall(name: string, args: Record<string, unknown>, turnId: string | null): Promise<unknown> {
     try {
-      const result = await this.callIntercomTool(name, args);
+      const result = await this.callIntercomTool(name, args, turnId);
       return appServerToolResponse(result);
     } catch (error) {
       return appServerToolResponse(textToolResult(error instanceof Error ? error.message : String(error), { ok: false }, true));
     }
   }
 
-  private async callIntercomTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  private async callIntercomTool(name: string, args: Record<string, unknown>, turnId: string | null): Promise<ToolResult> {
     switch (name) {
       case "intercom_whoami":
         return textToolResult(
@@ -394,6 +404,8 @@ export class VirtualCodexAgent {
         return textToolResult("Summary updated.", { ok: true, summary });
       }
       case "intercom_send": {
+        const limit = this.reserveToolMessage(turnId);
+        if (limit) return limit;
         const to = asString(args.to, "to");
         const message = asString(args.message, "message");
         const sendTo = await this.resolveTarget(to);
@@ -404,6 +416,8 @@ export class VirtualCodexAgent {
         return textToolResult(`Message sent to ${to}.`, { ok: true, message_id: result.id, to });
       }
       case "intercom_ask": {
+        const limit = this.reserveToolMessage(turnId);
+        if (limit) return limit;
         const to = asString(args.to, "to");
         const message = asString(args.message, "message");
         const sendTo = await this.resolveTarget(to);
@@ -424,6 +438,24 @@ export class VirtualCodexAgent {
       default:
         return textToolResult(`Unknown tool: ${name}`, { ok: false }, true);
     }
+  }
+
+  private reserveToolMessage(turnId: string | null): ToolResult | null {
+    const now = Date.now();
+    this.toolMessageTimestamps = this.toolMessageTimestamps.filter((timestamp) => now - timestamp < 60000);
+    if (this.toolMessageTimestamps.length >= MAX_TOOL_MESSAGES_PER_MINUTE) {
+      return textToolResult(`Intercom message limit reached: max ${MAX_TOOL_MESSAGES_PER_MINUTE} sidecar-originated sends per minute.`, { ok: false, limit: "per_minute" }, true);
+    }
+
+    const key = turnId ?? "unknown-turn";
+    const count = this.toolMessageCountsByTurn.get(key) ?? 0;
+    if (count >= MAX_TOOL_MESSAGES_PER_TURN) {
+      return textToolResult(`Intercom message limit reached: max ${MAX_TOOL_MESSAGES_PER_TURN} sidecar-originated sends per turn.`, { ok: false, limit: "per_turn" }, true);
+    }
+
+    this.toolMessageCountsByTurn.set(key, count + 1);
+    this.toolMessageTimestamps.push(now);
+    return null;
   }
 
   private async resolveTarget(to: string): Promise<string> {
@@ -479,6 +511,12 @@ export class CodexBridgeDaemon {
     await this.app.disconnect();
   }
 
+  async ensureThreadForAgent(agentId: string): Promise<string> {
+    const agent = this.agents.find((candidate) => candidate.id === agentId);
+    if (!agent) throw new Error(`No bridge agent registered with id: ${agentId}`);
+    return agent.ensureThread();
+  }
+
   private async handleServerRequest(message: JsonRpcMessage): Promise<unknown> {
     if (message.method === "mcpServer/elicitation/request" && isIntercomToolApprovalRequest(message.params)) {
       return { action: "accept", content: {}, _meta: null };
@@ -494,7 +532,7 @@ export class CodexBridgeDaemon {
       ? this.agents.find((candidate) => candidate.ownsThread(call.threadId!))
       : this.agents[0];
     if (!agent) return appServerToolResponse(textToolResult("No bridge agent owns this tool call.", { ok: false }, true));
-    return agent.handleToolCall(call.name, call.args);
+    return agent.handleToolCall(call.name, call.args, call.turnId);
   }
 }
 

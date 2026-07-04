@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CodexBridgeDaemon } from "./bridge-daemon.ts";
@@ -26,6 +26,27 @@ interface IdentityInput {
   gitRoot?: string | null;
   branch?: string | null;
 }
+
+const CODEX_OPTIONS_WITH_VALUE = new Set([
+  "-a",
+  "--ask-for-approval",
+  "--add-dir",
+  "-c",
+  "--cd",
+  "-C",
+  "--config",
+  "-i",
+  "--image",
+  "-m",
+  "--model",
+  "-p",
+  "--profile",
+  "--remote-auth-token-env",
+  "-s",
+  "--sandbox",
+  "--local-provider",
+]);
+const COI_STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function sanitizeSegment(value: string): string {
   return value
@@ -146,6 +167,32 @@ export function parseCoiArgs(argv: string[], env: NodeJS.ProcessEnv = process.en
   };
 }
 
+export function hasCodexHelpOrVersion(args: string[]): boolean {
+  return args.some((arg) => arg === "--help" || arg === "-h" || arg === "--version" || arg === "-V");
+}
+
+export function splitCodexResumeArgs(args: string[]): { optionArgs: string[]; promptArgs: string[] } {
+  const optionArgs: string[] = [];
+  const promptArgs: string[] = [];
+  let index = 0;
+  for (; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") {
+      promptArgs.push(...args.slice(index + 1));
+      return { optionArgs, promptArgs };
+    }
+    if (!arg.startsWith("-") || arg === "-") break;
+    optionArgs.push(arg);
+    const optionName = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    if (!arg.includes("=") && CODEX_OPTIONS_WITH_VALUE.has(optionName) && index + 1 < args.length) {
+      optionArgs.push(args[index + 1]);
+      index += 1;
+    }
+  }
+  promptArgs.push(...args.slice(index));
+  return { optionArgs, promptArgs };
+}
+
 async function waitForSocket(socketPath: string, proc: ChildProcess, timeoutMs = 10000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -173,12 +220,44 @@ async function stopChild(proc: ChildProcess | null): Promise<void> {
   });
 }
 
+export function cleanupOldCoiStateFiles(intercomDir: string, now = Date.now(), maxAgeMs = COI_STATE_MAX_AGE_MS): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(intercomDir);
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!/^coi-.+-state\.json$/.test(entry)) continue;
+    const path = join(intercomDir, entry);
+    try {
+      const stat = statSync(path);
+      if (now - stat.mtimeMs > maxAgeMs) rmSync(path, { force: true });
+    } catch {
+      // Best effort cleanup only.
+    }
+  }
+}
+
 export async function runCoi(options: CoiOptions): Promise<number> {
+  if (hasCodexHelpOrVersion(options.codexArgs)) {
+    const help = spawn(options.codexCommand, options.codexArgs, {
+      cwd: options.cwd,
+      env: process.env,
+      stdio: "inherit",
+    });
+    const [code, signal] = await once(help, "exit") as [number | null, NodeJS.Signals | null];
+    if (typeof code === "number") return code;
+    return signal === "SIGINT" ? 130 : 1;
+  }
+
   ensureIntercomRuntimeDir();
   const identity = detectIdentity(options.cwd);
   const id = sanitizeSegment(options.id ?? identity.id);
   const name = options.name ?? identity.name;
   const intercomDir = getIntercomDirPath();
+  cleanupOldCoiStateFiles(intercomDir);
   const socketPath = options.socketPath ?? join(intercomDir, `coi-${process.pid}.sock`);
   const statePath = options.statePath ?? join(intercomDir, `coi-${sanitizeSegment(id)}-state.json`);
   rmSync(socketPath, { force: true });
@@ -239,7 +318,12 @@ export async function runCoi(options: CoiOptions): Promise<number> {
     return 0;
   }
 
-  const tui = spawn(options.codexCommand, ["--remote", `unix://${socketPath}`, ...options.codexArgs], {
+  const remote = `unix://${socketPath}`;
+  const threadId = await daemon.ensureThreadForAgent(id);
+  const { optionArgs, promptArgs } = splitCodexResumeArgs(options.codexArgs);
+  process.stderr.write(`coi sidecar thread: ${threadId}\n`);
+  const resolvedTuiArgs = ["resume", "--remote", remote, ...optionArgs, threadId, ...promptArgs];
+  const tui = spawn(options.codexCommand, resolvedTuiArgs, {
     cwd: options.cwd,
     env: process.env,
     stdio: "inherit",
@@ -256,7 +340,7 @@ async function main(): Promise<void> {
   process.exit(code);
 }
 
-if (process.argv[1] && basename(process.argv[1]) === "coi.ts") {
+if (process.argv[1] && (basename(process.argv[1]) === "coi.ts" || basename(process.argv[1]) === "coi.mjs")) {
   void main().catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     process.exit(1);

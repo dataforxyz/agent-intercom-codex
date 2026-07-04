@@ -31,6 +31,12 @@ interface PendingRequest {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_WEBSOCKET_MESSAGE_BYTES = 16 * 1024 * 1024;
+
+export interface DecodedWebSocketFrame {
+  opcode: number;
+  payload: Buffer;
+}
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -61,7 +67,7 @@ export function defaultServerRequestResponse(method: string): unknown {
 export class CodexAppServerClient extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private socket: net.Socket | null = null;
-  private socketBuffer = Buffer.alloc(0);
+  private wsDecoder = new WebSocketFrameDecoder();
   private rl: readline.Interface | null = null;
   private nextId = 1;
   private pending = new Map<string | number, PendingRequest>();
@@ -246,6 +252,7 @@ export class CodexAppServerClient extends EventEmitter {
         .digest("base64");
       const socket = net.createConnection(socketPath);
       this.socket = socket;
+      this.wsDecoder = new WebSocketFrameDecoder();
       let handshake = Buffer.alloc(0);
       let settled = false;
 
@@ -336,43 +343,15 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   private handleWebSocketData(chunk: Buffer): void {
-    this.socketBuffer = Buffer.concat([this.socketBuffer, chunk]);
-    while (this.socketBuffer.length >= 2) {
-      const first = this.socketBuffer[0];
-      const second = this.socketBuffer[1];
-      const opcode = first & 0x0f;
-      const masked = Boolean(second & 0x80);
-      let length = second & 0x7f;
-      let offset = 2;
-
-      if (length === 126) {
-        if (this.socketBuffer.length < offset + 2) return;
-        length = this.socketBuffer.readUInt16BE(offset);
-        offset += 2;
-      } else if (length === 127) {
-        if (this.socketBuffer.length < offset + 8) return;
-        const bigLength = this.socketBuffer.readBigUInt64BE(offset);
-        if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) {
-          this.socket?.destroy(new Error("WebSocket frame too large"));
-          return;
-        }
-        length = Number(bigLength);
-        offset += 8;
-      }
-
-      const maskOffset = masked ? offset : -1;
-      if (masked) offset += 4;
-      if (this.socketBuffer.length < offset + length) return;
-
-      const mask = masked ? Buffer.from(this.socketBuffer.subarray(maskOffset, maskOffset + 4)) : null;
-      const payload = Buffer.from(this.socketBuffer.subarray(offset, offset + length));
-      this.socketBuffer = this.socketBuffer.subarray(offset + length);
-      if (masked) {
-        for (let index = 0; index < payload.length; index += 1) {
-          payload[index] ^= mask![index % 4];
-        }
-      }
-
+    let frames: DecodedWebSocketFrame[];
+    try {
+      frames = this.wsDecoder.push(chunk);
+    } catch (error) {
+      this.emit("protocolError", asError(error));
+      this.socket?.destroy(asError(error));
+      return;
+    }
+    for (const { opcode, payload } of frames) {
       if (opcode === 0x1) {
         this.handleLine(payload.toString("utf8"));
       } else if (opcode === 0x8) {
@@ -446,4 +425,101 @@ export class CodexAppServerClient extends EventEmitter {
 function defaultServerRequestResponseFromMessage(message: JsonRpcMessage): unknown {
   if (!message.method) throw new Error("Unsupported app-server request");
   return defaultServerRequestResponse(message.method);
+}
+
+export class WebSocketFrameDecoder {
+  private buffer = Buffer.alloc(0);
+  private continuationOpcode: number | null = null;
+  private continuationParts: Buffer[] = [];
+  private continuationBytes = 0;
+
+  push(chunk: Buffer): DecodedWebSocketFrame[] {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    const frames: DecodedWebSocketFrame[] = [];
+
+    while (this.buffer.length >= 2) {
+      const first = this.buffer[0];
+      const second = this.buffer[1];
+      const fin = Boolean(first & 0x80);
+      const rsv = first & 0x70;
+      const opcode = first & 0x0f;
+      const masked = Boolean(second & 0x80);
+      let length = second & 0x7f;
+      let offset = 2;
+
+      if (rsv !== 0) throw new Error("Unsupported WebSocket RSV bits");
+
+      if (length === 126) {
+        if (this.buffer.length < offset + 2) break;
+        length = this.buffer.readUInt16BE(offset);
+        offset += 2;
+      } else if (length === 127) {
+        if (this.buffer.length < offset + 8) break;
+        const bigLength = this.buffer.readBigUInt64BE(offset);
+        if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("WebSocket frame too large");
+        length = Number(bigLength);
+        offset += 8;
+      }
+
+      const maskOffset = masked ? offset : -1;
+      if (masked) offset += 4;
+      if (this.buffer.length < offset + length) break;
+
+      const mask = masked ? Buffer.from(this.buffer.subarray(maskOffset, maskOffset + 4)) : null;
+      const payload = Buffer.from(this.buffer.subarray(offset, offset + length));
+      this.buffer = this.buffer.subarray(offset + length);
+      if (masked) {
+        for (let index = 0; index < payload.length; index += 1) {
+          payload[index] ^= mask![index % 4];
+        }
+      }
+
+      this.acceptFrame(frames, opcode, fin, payload);
+    }
+
+    return frames;
+  }
+
+  private acceptFrame(frames: DecodedWebSocketFrame[], opcode: number, fin: boolean, payload: Buffer): void {
+    if (opcode >= 0x8) {
+      if (!fin) throw new Error("Fragmented WebSocket control frame");
+      if (payload.length > 125) throw new Error("Oversized WebSocket control frame");
+      frames.push({ opcode, payload });
+      return;
+    }
+
+    if (opcode === 0x0) {
+      if (this.continuationOpcode === null) throw new Error("Unexpected WebSocket continuation frame");
+      this.appendContinuation(payload);
+      if (fin) {
+        frames.push({ opcode: this.continuationOpcode, payload: Buffer.concat(this.continuationParts, this.continuationBytes) });
+        this.clearContinuation();
+      }
+      return;
+    }
+
+    if (opcode !== 0x1 && opcode !== 0x2) throw new Error(`Unsupported WebSocket opcode: ${opcode}`);
+    if (this.continuationOpcode !== null) throw new Error("New WebSocket data frame before continuation completed");
+    if (fin) {
+      frames.push({ opcode, payload });
+      return;
+    }
+
+    this.continuationOpcode = opcode;
+    this.continuationParts = [];
+    this.continuationBytes = 0;
+    this.appendContinuation(payload);
+  }
+
+  private appendContinuation(payload: Buffer): void {
+    this.continuationBytes += payload.length;
+    if (this.continuationBytes > MAX_WEBSOCKET_MESSAGE_BYTES) throw new Error("WebSocket message too large");
+    this.continuationParts.push(payload);
+  }
+
+  private clearContinuation(): void {
+    this.continuationOpcode = null;
+    this.continuationParts = [];
+    this.continuationBytes = 0;
+  }
 }
