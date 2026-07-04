@@ -5,7 +5,7 @@ import { CodexAppServerClient, defaultServerRequestResponse, type JsonRpcMessage
 import { loadBridgeConfig, loadBridgeState, saveBridgeState, type BridgeAgentConfig, type BridgeConfig, type BridgeState } from "./bridge-config.ts";
 import { IntercomClient } from "../broker/client.ts";
 import { spawnBrokerIfNeeded } from "../broker/spawn.ts";
-import { loadConfig } from "../config.ts";
+import { DEFAULT_ASK_TIMEOUT_MS, loadConfig, validateAskTimeoutMs } from "../config.ts";
 import type { Message, SessionInfo } from "../types.ts";
 import { formatAttachments, formatSessionList, resolveSessionTarget, type ToolResult } from "./runtime.ts";
 
@@ -33,7 +33,6 @@ const APPROVED_INTERCOM_TOOLS = new Set([
 ]);
 const MAX_TOOL_MESSAGES_PER_TURN = 8;
 const MAX_TOOL_MESSAGES_PER_MINUTE = 30;
-const DEFAULT_TOOL_ASK_TIMEOUT_MS = 120000;
 
 function formatMessage(from: SessionInfo, message: Message, agent: BridgeAgentConfig): string {
   const replyInstruction = message.expectsReply
@@ -118,8 +117,7 @@ function asString(value: unknown, name: string): string {
 
 function asOptionalPositiveInteger(value: unknown, name: string): number | undefined {
   if (value === undefined) return undefined;
-  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
-  return value;
+  return validateAskTimeoutMs(value, name);
 }
 
 function normalizeToolName(name: string): string {
@@ -427,7 +425,7 @@ export class VirtualCodexAgent {
         if (limit) return limit;
         const to = asString(args.to, "to");
         const message = asString(args.message, "message");
-        const timeoutMs = asOptionalPositiveInteger(args.timeout_ms, "timeout_ms") ?? DEFAULT_TOOL_ASK_TIMEOUT_MS;
+        const timeoutMs = asOptionalPositiveInteger(args.timeout_ms, "timeout_ms") ?? DEFAULT_ASK_TIMEOUT_MS;
         const sendTo = await this.resolveTarget(to);
         const questionId = randomUUID();
         const replyPromise = this.waitForToolReply(sendTo, questionId, timeoutMs);
@@ -471,7 +469,7 @@ export class VirtualCodexAgent {
     return resolveSessionTarget(sessions, to) ?? to;
   }
 
-  private waitForToolReply(from: string, replyTo: string, timeoutMs = DEFAULT_TOOL_ASK_TIMEOUT_MS): Promise<Message> {
+  private waitForToolReply(from: string, replyTo: string, timeoutMs = DEFAULT_ASK_TIMEOUT_MS): Promise<Message> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.toolReplyWaiters.delete(replyTo);

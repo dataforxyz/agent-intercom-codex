@@ -57,6 +57,20 @@ test("tools/call passes ask timeout through", async () => {
   assert.equal(((response?.result as any).content[0]).text, "ask:worker:hello:2500");
 });
 
+test("tools/call rejects ask timeouts above the interactive maximum", async () => {
+  const response = await handleMcpRequest({
+    id: 6,
+    method: "tools/call",
+    params: {
+      name: "intercom_ask",
+      arguments: { to: "worker", message: "hello", timeout_ms: 600000 },
+    },
+  }, fakeRuntime());
+
+  assert.equal((response?.result as any).isError, true);
+  assert.match(((response?.result as any).content[0]).text, /intercom_send plus intercom_pending/);
+});
+
 test("tools/call reports validation errors as tool errors", async () => {
   const response = await handleMcpRequest({
     id: 4,

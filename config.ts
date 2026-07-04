@@ -2,7 +2,18 @@ import { existsSync, readFileSync } from "fs";
 import { join, resolve } from "path";
 import { homedir } from "os";
 
-export const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
+export const DEFAULT_ASK_TIMEOUT_MS = 45 * 1000;
+export const MAX_ASK_TIMEOUT_MS = 120 * 1000;
+
+export function validateAskTimeoutMs(value: unknown, name = "timeout_ms"): number {
+  if (!Number.isSafeInteger(value) || typeof value !== "number" || value <= 0) {
+    throw new Error(`${name} must be a positive integer number of milliseconds`);
+  }
+  if (value > MAX_ASK_TIMEOUT_MS) {
+    throw new Error(`${name} must be ${MAX_ASK_TIMEOUT_MS} ms or less; use intercom_send plus intercom_pending for longer-running work`);
+  }
+  return value;
+}
 
 export function getAskTimeoutMs(): number {
   const raw = process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
@@ -11,10 +22,7 @@ export function getAskTimeoutMs(): number {
   }
 
   const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error("PI_INTERCOM_ASK_TIMEOUT_MS must be a positive integer number of milliseconds");
-  }
-  return value;
+  return validateAskTimeoutMs(value, "PI_INTERCOM_ASK_TIMEOUT_MS");
 }
 
 export interface InboundForkHandlersConfig {

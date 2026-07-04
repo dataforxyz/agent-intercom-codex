@@ -1,4 +1,5 @@
 import type { CodexIntercomRuntime, ToolResult } from "./runtime.ts";
+import { validateAskTimeoutMs } from "../config.ts";
 
 interface JsonRpcRequest {
   jsonrpc?: string;
@@ -29,10 +30,7 @@ function asBoolean(value: unknown, defaultValue: boolean): boolean {
 
 function asOptionalPositiveInteger(value: unknown, name: string): number | undefined {
   if (value === undefined) return undefined;
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive integer`);
-  }
-  return value;
+  return validateAskTimeoutMs(value, name);
 }
 
 function asAttachmentArray(value: unknown) {
@@ -130,7 +128,7 @@ export function buildToolDefinitions(runtime: CodexIntercomRuntime): ToolDefinit
           to: { type: "string" },
           message: { type: "string" },
           attachments: attachmentsSchema,
-          timeout_ms: { type: "integer", minimum: 1, description: "Maximum time to wait for a reply before returning an error." },
+          timeout_ms: { type: "integer", minimum: 1, maximum: 120000, description: "Maximum time to wait for a reply before returning an error. Use intercom_send plus intercom_pending for longer work." },
         },
         required: ["to", "message"],
         additionalProperties: false,

@@ -161,9 +161,13 @@ Ask and wait:
 intercom_ask({
   to: "planner",
   message: "Should retry apply only to idempotent endpoints?",
-  timeout_ms: 120000
+  timeout_ms: 45000
 })
 ```
+
+Blocking asks default to 45 seconds and reject waits over 120 seconds. For
+longer-running work, use `intercom_send` and check later with
+`intercom_pending` instead of blocking the agent turn.
 
 Check and reply:
 
@@ -193,7 +197,7 @@ Wake an app-server-backed virtual worker:
 intercom_ask({
   to: "codex-worker",
   message: "Please inspect the latest failing test and reply with the likely cause.",
-  timeout_ms: 120000
+  timeout_ms: 45000
 })
 ```
 
@@ -232,9 +236,9 @@ or an alternate one such as `CODEX_HOME=~/.codex-alt`.
 Current limitation: the sidecar can be messaged while the `coi` process is
 running and will wake an app-server-backed Codex turn. It does not make every
 ordinary `codex` process wakeable; launch the agent through `coi` when you want
-this behavior. Blocking asks can set `timeout_ms`; sidecar asks default to 120
-seconds. Sidecar-originated intercom sends are capped per turn and per minute to
-prevent unattended ping-pong loops.
+this behavior. Blocking asks can set `timeout_ms`; sidecar asks default to 45
+seconds and reject waits over 120 seconds. Sidecar-originated intercom sends are
+capped per turn and per minute to prevent unattended ping-pong loops.
 
 ## Relationship To Pi Intercom
 
