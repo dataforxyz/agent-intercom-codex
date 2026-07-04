@@ -21,6 +21,17 @@ interface ToolReplyWaiter {
   timeout: NodeJS.Timeout;
 }
 
+const APPROVED_INTERCOM_TOOLS = new Set([
+  "intercom_whoami",
+  "intercom_status",
+  "intercom_list",
+  "intercom_set_summary",
+  "intercom_send",
+  "intercom_ask",
+  "intercom_pending",
+  "intercom_reply",
+]);
+
 function formatMessage(from: SessionInfo, message: Message, agent: BridgeAgentConfig): string {
   const replyInstruction = message.expectsReply
     ? "\n\nThe sender is waiting for a reply. Put the reply in your final assistant message."
@@ -154,6 +165,9 @@ export class VirtualCodexAgent {
   private waiters = new Map<string, TurnWaiter[]>();
   private finalMessages = new Map<string, string>();
   private toolReplyWaiters = new Map<string, ToolReplyWaiter>();
+  private messageQueue: Promise<void> = Promise.resolve();
+  private idleWaiters: Array<() => void> = [];
+  private turnCompletionWaiters = new Map<string, Array<() => void>>();
 
   constructor(
     private readonly agent: BridgeAgentConfig,
@@ -166,7 +180,7 @@ export class VirtualCodexAgent {
 
   async start(): Promise<void> {
     this.client.on("message", (from: SessionInfo, message: Message) => {
-      void this.handleMessage(from, message).catch((error) => {
+      void this.routeMessage(from, message).catch((error) => {
         this.client.updatePresence({ status: `error: ${error instanceof Error ? error.message : String(error)}` });
       });
     });
@@ -220,7 +234,9 @@ export class VirtualCodexAgent {
       if (!turnId) return;
       if (this.activeTurnId === turnId) this.activeTurnId = null;
       this.client.updatePresence({ status: "idle" });
-      void this.replyToWaiters(turnId);
+      const idleWaiters = this.idleWaiters.splice(0);
+      for (const resolve of idleWaiters) resolve();
+      void this.finishTurn(turnId);
     }
   }
 
@@ -257,45 +273,40 @@ export class VirtualCodexAgent {
     return this.threadId;
   }
 
-  private async handleMessage(from: SessionInfo, message: Message): Promise<void> {
+  private routeMessage(from: SessionInfo, message: Message): Promise<void> {
     const toolWaiter = this.toolReplyWaiters.get(message.replyTo ?? "");
     if (toolWaiter) {
-      const fromMatches = from.id === toolWaiter.from || from.name?.toLowerCase() === toolWaiter.from.toLowerCase();
-      if (fromMatches) {
+      if (from.id === toolWaiter.from) {
         this.toolReplyWaiters.delete(message.replyTo ?? "");
         clearTimeout(toolWaiter.timeout);
         toolWaiter.resolve(message);
-        return;
+        return Promise.resolve();
       }
     }
 
+    const run = this.messageQueue
+      .catch(() => undefined)
+      .then(() => this.handleMessage(from, message));
+    this.messageQueue = run.catch((error) => {
+      this.client.updatePresence({ status: `error: ${error instanceof Error ? error.message : String(error)}` });
+    });
+    return run;
+  }
+
+  private async handleMessage(from: SessionInfo, message: Message): Promise<void> {
     const threadId = await this.ensureThread();
+    await this.waitUntilIdle();
     const input = [textInput(formatMessage(from, message, this.agent))];
-    let turnId: string;
-
-    if (this.activeTurnId) {
-      try {
-        const result = await this.app.request("turn/steer", {
-          threadId,
-          expectedTurnId: this.activeTurnId,
-          input,
-        });
-        const steered = result && typeof result === "object" ? (result as Record<string, unknown>).turnId : undefined;
-        turnId = typeof steered === "string" ? steered : this.activeTurnId;
-      } catch {
-        const result = await this.startTurn(threadId, input);
-        turnId = getTurnId(result);
-      }
-    } else {
-      const result = await this.startTurn(threadId, input);
-      turnId = getTurnId(result);
-    }
+    const result = await this.startTurn(threadId, input);
+    const turnId = getTurnId(result);
+    const completed = this.waitForTurnCompletion(turnId);
 
     if (message.expectsReply) {
       const waiters = this.waiters.get(turnId) ?? [];
       waiters.push({ from, message });
       this.waiters.set(turnId, waiters);
     }
+    await completed;
   }
 
   private startTurn(threadId: string, input: Array<ReturnType<typeof textInput>>): Promise<unknown> {
@@ -319,6 +330,33 @@ export class VirtualCodexAgent {
       await this.client.send(waiter.from.id, { text: reply, replyTo: waiter.message.id }).catch((error) => {
         process.stderr.write(`reply failed for ${this.agent.id}: ${error instanceof Error ? error.message : String(error)}\n`);
       });
+    }
+  }
+
+  private waitUntilIdle(): Promise<void> {
+    if (!this.activeTurnId) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.idleWaiters.push(resolve);
+    });
+  }
+
+  private waitForTurnCompletion(turnId: string): Promise<void> {
+    return new Promise((resolve) => {
+      const waiters = this.turnCompletionWaiters.get(turnId) ?? [];
+      waiters.push(resolve);
+      this.turnCompletionWaiters.set(turnId, waiters);
+    });
+  }
+
+  private async finishTurn(turnId: string): Promise<void> {
+    try {
+      await this.replyToWaiters(turnId);
+    } finally {
+      this.finalMessages.delete(turnId);
+      this.waiters.delete(turnId);
+      const waiters = this.turnCompletionWaiters.get(turnId) ?? [];
+      this.turnCompletionWaiters.delete(turnId);
+      for (const resolve of waiters) resolve();
     }
   }
 
@@ -460,10 +498,28 @@ export class CodexBridgeDaemon {
   }
 }
 
-function isIntercomToolApprovalRequest(params: unknown): boolean {
+export function isIntercomToolApprovalRequest(params: unknown): boolean {
   if (!isRecord(params)) return false;
   const meta = isRecord(params._meta) ? params._meta : {};
-  return params.serverName === "codex-intercom" && meta.codex_approval_kind === "mcp_tool_call";
+  return params.serverName === "codex-intercom"
+    && meta.codex_approval_kind === "mcp_tool_call"
+    && Boolean(getApprovedIntercomToolFromApproval(params));
+}
+
+export function getApprovedIntercomToolFromApproval(params: unknown): string | null {
+  if (!isRecord(params)) return null;
+  const meta = isRecord(params._meta) ? params._meta : {};
+  const candidates = [
+    meta.tool,
+    meta.toolName,
+    meta.tool_name,
+    meta.name,
+    typeof params.message === "string" ? params.message.match(/tool "([^"]+)"/)?.[1] : undefined,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && APPROVED_INTERCOM_TOOLS.has(candidate)) return candidate;
+  }
+  return null;
 }
 
 async function main(): Promise<void> {
