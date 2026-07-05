@@ -37,7 +37,14 @@ const MAX_TOOL_MESSAGES_PER_MINUTE = 30;
 
 function formatMessage(from: SessionInfo, message: Message, agent: BridgeAgentConfig): string {
   const replyInstruction = message.expectsReply
-    ? "\n\nThe sender is waiting for a reply. Put the reply in your final assistant message."
+    ? [
+      "",
+      "",
+      "The sender is waiting for a blocking intercom reply.",
+      "The coi sidecar will automatically send your final assistant message as the reply to this ask.",
+      "Do not use intercom_reply or intercom_send to answer this ask; normal Codex MCP intercom tools run under a separate session identity and will not unblock the sender.",
+      "If you need to acknowledge first, put the acknowledgement at the start of your final assistant message.",
+    ].join("\n")
     : "";
   const attachments = message.content.attachments?.map((attachment) => {
     const language = attachment.language ? ` (${attachment.language})` : "";
@@ -107,6 +114,34 @@ function getCompletedAgentText(params: unknown): string | null {
   return raw.type === "agentMessage" && typeof raw.text === "string" ? raw.text : null;
 }
 
+function intercomSendFromArgs(rawArgs: unknown): { to: string; message: string } | null {
+  let args: Record<string, unknown>;
+  try {
+    args = parseToolArguments(rawArgs);
+  } catch {
+    return null;
+  }
+  return typeof args.to === "string" && typeof args.message === "string"
+    ? { to: args.to, message: args.message }
+    : null;
+}
+
+export function getCompletedIntercomSend(params: unknown): { to: string; message: string } | null {
+  if (!params || typeof params !== "object") return null;
+  const item = (params as Record<string, unknown>).item;
+  if (!isRecord(item)) return null;
+  const rawName = item.name ?? item.toolName ?? item.tool_name;
+  if (typeof rawName !== "string" || normalizeToolName(rawName) !== "intercom_send") return null;
+  return intercomSendFromArgs(item.arguments ?? item.args ?? item.input);
+}
+
+export function getApprovedIntercomSend(params: unknown): { to: string; message: string } | null {
+  if (getApprovedIntercomToolFromApproval(params) !== "intercom_send") return null;
+  if (!isRecord(params)) return null;
+  const meta = isRecord(params._meta) ? params._meta : {};
+  return intercomSendFromArgs(meta.tool_params ?? meta.toolParams ?? meta.tool_params_json);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -122,7 +157,7 @@ function asOptionalPositiveInteger(value: unknown, name: string): number | undef
 }
 
 function normalizeToolName(name: string): string {
-  const mcpMatch = name.match(/(?:^|__)intercom_(whoami|status|list|set_summary|send|ask|pending|reply)$/);
+  const mcpMatch = name.match(/(?:^|__|\.)intercom_(whoami|status|list|set_summary|send|ask|pending|reply)$/);
   if (mcpMatch) return `intercom_${mcpMatch[1]}`;
   return name;
 }
@@ -241,6 +276,12 @@ export class VirtualCodexAgent {
       const turnId = getNotificationTurnId(message.params);
       const text = getCompletedAgentText(message.params);
       if (turnId && text) this.finalMessages.set(turnId, text);
+      const intercomSend = getCompletedIntercomSend(message.params);
+      if (turnId && intercomSend) {
+        void this.replyToWaitersFromIntercomSend(turnId, intercomSend).catch((error) => {
+          process.stderr.write(`reply failed for ${this.agent.id} after intercom_send: ${error instanceof Error ? error.message : String(error)}\n`);
+        });
+      }
       return;
     }
 
@@ -346,6 +387,31 @@ export class VirtualCodexAgent {
       await this.client.send(waiter.from.id, { text: reply, replyTo: waiter.message.id }).catch((error) => {
         process.stderr.write(`reply failed for ${this.agent.id}: ${error instanceof Error ? error.message : String(error)}\n`);
       });
+    }
+  }
+
+  async replyToWaitersFromIntercomSend(turnId: string, send: { to: string; message: string }): Promise<void> {
+    const waiters = this.waiters.get(turnId);
+    if (!waiters?.length) return;
+    const lowerTo = send.to.toLowerCase();
+    const remaining: TurnWaiter[] = [];
+    for (const waiter of waiters) {
+      const matchesSender = send.to === waiter.from.id
+        || waiter.from.id.startsWith(send.to)
+        || waiter.from.name?.toLowerCase() === lowerTo;
+      if (!matchesSender) {
+        remaining.push(waiter);
+        continue;
+      }
+      await this.client.send(waiter.from.id, { text: send.message, replyTo: waiter.message.id }).catch((error) => {
+        remaining.push(waiter);
+        process.stderr.write(`reply failed for ${this.agent.id}: ${error instanceof Error ? error.message : String(error)}\n`);
+      });
+    }
+    if (remaining.length) {
+      this.waiters.set(turnId, remaining);
+    } else {
+      this.waiters.delete(turnId);
     }
   }
 
@@ -553,6 +619,13 @@ export class CodexBridgeDaemon {
 
   private async handleServerRequest(message: JsonRpcMessage): Promise<unknown> {
     if (message.method === "mcpServer/elicitation/request" && isIntercomToolApprovalRequest(message.params)) {
+      const threadId = getNotificationThreadId(message.params);
+      const turnId = getNotificationTurnId(message.params);
+      const intercomSend = getApprovedIntercomSend(message.params);
+      if (threadId && turnId && intercomSend) {
+        const agent = this.agents.find((candidate) => candidate.ownsThread(threadId));
+        if (agent) await agent.replyToWaitersFromIntercomSend(turnId, intercomSend);
+      }
       return { action: "accept", content: {}, _meta: null };
     }
 
