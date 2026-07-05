@@ -1,5 +1,10 @@
 # Codex Intercom
 
+<p>
+  <img src="./assets/logo.svg" alt="Codex Intercom SVG logo" width="96" height="96">
+  <img src="./assets/logo-generated.png" alt="Codex Intercom generated PNG logo" width="96" height="96">
+</p>
+
 Codex MCP plugin for direct local messaging with Pi and Codex coding-agent
 sessions on the same machine.
 

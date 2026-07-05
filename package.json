@@ -9,6 +9,7 @@
     "coi": "dist/coi.mjs"
   },
   "files": [
+    "assets/**/*",
     "dist/**/*",
     "codex/**/*.ts",
     "broker/**/*.ts",
