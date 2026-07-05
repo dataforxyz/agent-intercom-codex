@@ -66,6 +66,27 @@ function usesDefaultBrokerCommand(brokerCommand: string, brokerArgs: string[]): 
     && brokerArgs[1] === "tsx";
 }
 
+export function getBrokerScriptPath(moduleUrl: string = import.meta.url): string {
+  const currentDir = dirname(fileURLToPath(moduleUrl));
+  const bundledBrokerPath = join(currentDir, "broker.mjs");
+  if (existsSync(bundledBrokerPath)) {
+    return bundledBrokerPath;
+  }
+  return join(currentDir, "broker.ts");
+}
+
+export function getEffectiveBrokerCommand(
+  brokerPath: string,
+  brokerCommand: string,
+  brokerArgs: string[],
+  nodePath: string = process.execPath,
+): { command: string; args: string[] } {
+  if (brokerPath.endsWith(".mjs") && usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
+    return { command: nodePath, args: [] };
+  }
+  return { command: brokerCommand, args: brokerArgs };
+}
+
 export function getWindowsBrokerCommandLine(
   brokerPath: string,
   extensionDir: string = EXTENSION_DIR,
@@ -73,11 +94,16 @@ export function getWindowsBrokerCommandLine(
   brokerCommand = "npx",
   brokerArgs: string[] = ["--no-install", "tsx"],
 ): string {
-  if (usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
+  const effective = getEffectiveBrokerCommand(brokerPath, brokerCommand, brokerArgs, nodePath);
+  if (effective.command === nodePath && effective.args.length === 0) {
+    return [quoteWindowsArg(nodePath), quoteWindowsArg(brokerPath)].join(" ");
+  }
+
+  if (usesDefaultBrokerCommand(effective.command, effective.args)) {
     return [quoteWindowsArg(nodePath), quoteWindowsArg(getTsxCliPath(extensionDir)), quoteWindowsArg(brokerPath)].join(" ");
   }
 
-  return [quoteWindowsArg(brokerCommand), ...brokerArgs.map(quoteWindowsArg), quoteWindowsArg(brokerPath)].join(" ");
+  return [quoteWindowsArg(effective.command), ...effective.args.map(quoteWindowsArg), quoteWindowsArg(brokerPath)].join(" ");
 }
 
 export function getWindowsHiddenLauncherScript(commandLine: string): string {
@@ -111,6 +137,7 @@ export function getBrokerLaunchSpec(
   intercomDir: string = INTERCOM_DIR,
   nodePath: string = process.execPath,
 ): BrokerLaunchSpec {
+  const effective = getEffectiveBrokerCommand(brokerPath, brokerCommand, brokerArgs, nodePath);
   if (platform === "win32") {
     const launcherPath = getWindowsHiddenLauncherPath(intercomDir);
     return {
@@ -118,14 +145,14 @@ export function getBrokerLaunchSpec(
       command: "wscript.exe",
       args: [launcherPath],
       launcherPath,
-      launcherCommandLine: getWindowsBrokerCommandLine(brokerPath, extensionDir, nodePath, brokerCommand, brokerArgs),
+      launcherCommandLine: getWindowsBrokerCommandLine(brokerPath, extensionDir, nodePath, effective.command, effective.args),
     };
   }
 
   return {
     kind: "direct",
-    command: brokerCommand,
-    args: [...brokerArgs, brokerPath],
+    command: effective.command,
+    args: [...effective.args, brokerPath],
   };
 }
 
@@ -167,7 +194,7 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
       return;
     }
 
-    const brokerPath = join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
+    const brokerPath = getBrokerScriptPath();
     const launch = getBrokerLaunchSpec(brokerPath, brokerCommand, brokerArgs);
     if (launch.kind === "windows-launcher") {
       writeWindowsHiddenLauncher(launch.launcherCommandLine, launch.launcherPath);

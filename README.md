@@ -38,12 +38,24 @@ asks are answered with the worker's final assistant message.
 
 ## Local Setup
 
+Use the built MCP server for a stable local install:
+
 ```bash
 git clone https://github.com/dataforxyz/codex-intercom.git
 cd codex-intercom
 npm install
-codex mcp add codex-intercom -- npx --no-install tsx ./codex/server.ts
+npm run build
+codex mcp add codex-intercom -- node ./dist/codex-server.mjs
 ```
+
+For development, you can keep running the TypeScript source directly:
+
+```bash
+codex mcp add codex-intercom-dev -- npx --no-install tsx ./codex/server.ts
+```
+
+Use either the built install or the dev install in a given Codex profile. Running
+both at the same time can register duplicate intercom MCP tools.
 
 Optional identity variables:
 
@@ -61,7 +73,7 @@ forwarded into the MCP server process.
 codex mcp add codex-planner \
   --env CODEX_INTERCOM_NAME=planner \
   --env CODEX_INTERCOM_SESSION_ID=codex-planner \
-  -- npx --no-install tsx /absolute/path/to/codex-intercom/codex/server.ts
+  -- node /absolute/path/to/codex-intercom/dist/codex-server.mjs
 ```
 
 For ad hoc multi-Codex runs, the easiest discovery flow is to have the receiver
@@ -79,11 +91,17 @@ This repo includes Codex plugin metadata:
 The plugin runs the MCP server with:
 
 ```bash
-npx --no-install tsx ./codex/server.ts
+node ./dist/codex-server.mjs
 ```
 
-That means a local checkout currently needs `npm install` before Codex starts
-the MCP server.
+That means a local checkout needs `npm install` and `npm run build` before
+Codex starts the MCP server. The installed plugin does not need `tsx` at
+runtime; the built server starts the bundled broker with `node`.
+
+The plugin install path is separate from the dev MCP path above. Installing and
+enabling the plugin makes its bundled MCP server and skill available in new
+Codex threads; leaving it uninstalled or disabled does not affect a direct MCP
+setup.
 
 ## App-Server Bridge
 
@@ -222,6 +240,8 @@ Build or link the installable command:
 ```bash
 npm run build
 npm link
+codex mcp add codex-intercom -- codex-intercom-mcp
+codex-intercom-bridge --config /home/you/.pi/agent/intercom/codex-bridge.json
 coi --profile cliproxy
 ```
 

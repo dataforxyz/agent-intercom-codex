@@ -1,9 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import {
+  getBrokerScriptPath,
+  getEffectiveBrokerCommand,
   getBrokerLaunchSpec,
   getBrokerSpawnOptions,
   getTsxCliPath,
@@ -22,6 +25,37 @@ test("getTsxCliPath resolves tsx cli via module resolution", () => {
   assert.equal(path.basename(path.dirname(path.dirname(cliPath))), "tsx");
 });
 
+test("getBrokerScriptPath uses bundled broker when present next to the current module", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "codex-intercom-dist-"));
+
+  try {
+    const serverPath = path.join(dir, "codex-server.mjs");
+    const brokerPath = path.join(dir, "broker.mjs");
+    writeFileSync(serverPath, "");
+    writeFileSync(brokerPath, "");
+    assert.equal(getBrokerScriptPath(pathToFileURL(serverPath).href), brokerPath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("getBrokerScriptPath falls back to source broker next to spawn.ts", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "codex-intercom-src-"));
+
+  try {
+    const spawnPath = path.join(dir, "spawn.ts");
+    writeFileSync(spawnPath, "");
+    assert.equal(getBrokerScriptPath(pathToFileURL(spawnPath).href), path.join(dir, "broker.ts"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("getEffectiveBrokerCommand runs bundled broker with node when config is default", () => {
+  const effective = getEffectiveBrokerCommand("/repo/dist/broker.mjs", "npx", ["--no-install", "tsx"], "/usr/bin/node");
+  assert.deepEqual(effective, { command: "/usr/bin/node", args: [] });
+});
+
 test("getWindowsHiddenLauncherPath points at the broker launcher script", () => {
   const launcherPath = getWindowsHiddenLauncherPath("C:/tmp/intercom");
   assert.equal(launcherPath, path.join("C:/tmp/intercom", "broker-launch.vbs"));
@@ -38,6 +72,15 @@ test("getWindowsBrokerCommandLine wraps node, resolved tsx cli, and broker path"
     commandLine,
     `"C:/Program Files/nodejs/node.exe" "${expectedTsxPath}" "C:/repo/broker.ts"`,
   );
+});
+
+test("getWindowsBrokerCommandLine runs bundled broker directly with node", () => {
+  const commandLine = getWindowsBrokerCommandLine(
+    "C:/repo/dist/broker.mjs",
+    "C:/repo",
+    "C:/Program Files/nodejs/node.exe",
+  );
+  assert.equal(commandLine, `"C:/Program Files/nodejs/node.exe" "C:/repo/dist/broker.mjs"`);
 });
 
 test("getWindowsHiddenLauncherScript runs the broker command without showing a console", () => {
@@ -91,6 +134,13 @@ test("getBrokerLaunchSpec uses npx + tsx on non-Windows", () => {
     "tsx",
     "C:/repo/broker.ts",
   ]);
+  assert.equal(spec.kind, "direct");
+});
+
+test("getBrokerLaunchSpec uses node for bundled broker on non-Windows with default config", () => {
+  const spec = getBrokerLaunchSpec("/repo/dist/broker.mjs", "npx", ["--no-install", "tsx"], "/repo", "linux", "/tmp/intercom", "/usr/bin/node");
+  assert.equal(spec.command, "/usr/bin/node");
+  assert.deepEqual(spec.args, ["/repo/dist/broker.mjs"]);
   assert.equal(spec.kind, "direct");
 });
 

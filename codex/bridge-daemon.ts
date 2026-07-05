@@ -692,7 +692,7 @@ async function main(): Promise<void> {
   await once(process, "SIGTERM");
 }
 
-if (process.argv[1] && basename(process.argv[1]) === "bridge-daemon.ts") {
+if (process.argv[1] && (basename(process.argv[1]) === "bridge-daemon.ts" || basename(process.argv[1]) === "bridge-daemon.mjs")) {
   void main().catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     process.exit(1);

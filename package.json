@@ -4,8 +4,10 @@
   "description": "Codex MCP plugin for direct local messaging with Pi and Codex coding-agent sessions.",
   "license": "MIT",
   "type": "module",
-  "main": "codex/server.ts",
+  "main": "dist/codex-server.mjs",
   "bin": {
+    "codex-intercom-mcp": "dist/codex-server.mjs",
+    "codex-intercom-bridge": "dist/bridge-daemon.mjs",
     "coi": "dist/coi.mjs"
   },
   "files": [
@@ -23,7 +25,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "node scripts/build-coi.mjs",
+    "build": "node scripts/build.mjs",
     "prepare": "npm run build",
     "codex:mcp": "tsx codex/server.ts",
     "codex:bridge": "tsx codex/bridge-daemon.ts",
@@ -37,11 +39,9 @@
     "multi-agent",
     "pi"
   ],
-  "dependencies": {
-    "tsx": "^4.20.0"
-  },
   "devDependencies": {
     "esbuild": "^0.28.1",
+    "tsx": "^4.20.0",
     "typescript": "^6.0.3"
   }
 }

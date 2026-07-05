@@ -11,16 +11,23 @@ const rl = readline.createInterface({
 });
 
 let shuttingDown = false;
+let pendingRequests = 0;
 
 function writeResponse(response: Record<string, unknown> | undefined): void {
   if (!response) return;
   stdout.write(`${JSON.stringify(response)}\n`);
 }
 
+function maybeShutdown(): void {
+  if (!shuttingDown || pendingRequests > 0) return;
+  void runtime.disconnect().finally(() => process.exit(0));
+}
+
 rl.on("line", (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  pendingRequests += 1;
   void (async () => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
     try {
       const request = JSON.parse(trimmed);
       writeResponse(await handleMcpRequest(request, runtime));
@@ -34,14 +41,17 @@ rl.on("line", (line) => {
         },
       });
     }
-  })();
+  })().finally(() => {
+    pendingRequests -= 1;
+    maybeShutdown();
+  });
 });
 
 const shutdown = () => {
   if (shuttingDown) return;
   shuttingDown = true;
   rl.close();
-  void runtime.disconnect().finally(() => process.exit(0));
+  maybeShutdown();
 };
 
 rl.on("close", shutdown);
