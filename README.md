@@ -266,6 +266,100 @@ this behavior. Blocking asks can set `timeout_ms`; sidecar asks default to 45
 seconds and reject waits over 120 seconds. Sidecar-originated intercom sends are
 capped per turn and per minute to prevent unattended ping-pong loops.
 
+## Minimal Wakeable Codex Profile
+
+Use a separate `CODEX_HOME` when you want a small Codex environment dedicated to
+intercom work. This avoids your normal Codex config, memories, plugins, and
+installed skills while still keeping `coi` wake-on-message behavior.
+
+Create the home and config:
+
+```bash
+export CODEX_MIN_HOME="$HOME/.codex-min-intercom"
+export CODEX_INTERCOM_REPO="/absolute/path/to/codex-intercom"
+mkdir -p "$CODEX_MIN_HOME"
+```
+
+`$CODEX_MIN_HOME/config.toml`:
+
+```toml
+model = "gpt-5.5"
+web_search = "disabled"
+
+[features]
+apps = false
+memories = false
+web_search = false
+web_search_cached = false
+web_search_request = false
+
+# Keep the core coding-agent surface.
+goals = true
+multi_agent = true
+shell_tool = true
+unified_exec = true
+auto_compaction = true
+tool_call_mcp_elicitation = true
+
+# Disable optional/distraction-heavy surfaces.
+browser_use = false
+browser_use_external = false
+browser_use_full_cdp_access = false
+in_app_browser = false
+computer_use = false
+image_generation = false
+plugins = false
+plugin_sharing = false
+tool_suggest = false
+skill_mcp_dependency_install = false
+hooks = false
+workspace_dependencies = false
+
+[mcp_servers.codex-intercom]
+command = "node"
+args = ["/absolute/path/to/codex-intercom/dist/codex-server.mjs"]
+```
+
+After the first launch, Codex may populate system skills under the alternate
+home. To keep the profile minimal without deleting anything, list the skill
+paths and add per-skill disables:
+
+```bash
+find "$CODEX_MIN_HOME/skills" -name SKILL.md -print
+```
+
+For each path you want disabled, add:
+
+```toml
+[[skills.config]]
+path = "/absolute/path/from/find/SKILL.md"
+enabled = false
+```
+
+There is no required alias name, but a short one such as `cim` keeps the command
+easy to launch:
+
+```bash
+cim() {
+  local home="${CODEX_MIN_HOME:-$HOME/.codex-min-intercom}"
+  local repo="${CODEX_INTERCOM_REPO:-$HOME/src/codex-intercom}"
+  CODEX_HOME="$home" node "$repo/dist/coi.mjs" --name codex-min "$@"
+}
+```
+
+Use it like:
+
+```bash
+cim
+cim --id worker-a --instructions "Reply tersely."
+cim --no-tui --id background-worker
+```
+
+This is intentionally not the same as launching plain `codex` with an MCP
+server. Plain MCP sessions can receive queued messages, but they do not wake
+automatically. `coi` is the part that registers an app-server sidecar and starts
+a Codex turn when another session sends `intercom_send` or `intercom_ask`.
+
 ## Relationship To Pi Intercom
 
 `pi-intercom` remains the Pi-native extension with overlays, inline rendering,
