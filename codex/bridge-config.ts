@@ -89,7 +89,7 @@ export function loadBridgeConfig(path = process.env.CODEX_INTERCOM_BRIDGE_CONFIG
   if (!isRecord(parsed)) throw new Error("Bridge config must be a JSON object");
   if (!Array.isArray(parsed.agents)) throw new Error("Bridge config requires an agents array");
 
-  const appServer = isRecord(parsed.appServer) ? {
+  const appServer: BridgeConfig["appServer"] = isRecord(parsed.appServer) ? {
     command: optionalString(parsed.appServer.command, "appServer.command"),
     args: Array.isArray(parsed.appServer.args) ? parsed.appServer.args.map((arg, index) => requireString(arg, `appServer.args[${index}]`)) : undefined,
     transport: parsed.appServer.transport === "unix-websocket" || parsed.appServer.transport === "stdio" ? parsed.appServer.transport : undefined,

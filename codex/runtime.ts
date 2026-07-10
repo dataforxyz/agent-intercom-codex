@@ -142,8 +142,9 @@ export class CodexIntercomRuntime {
     if (!config.enabled) throw new Error("Intercom disabled");
     await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
     const client = new IntercomClient();
-    client.on("message", (from: SessionInfo, message: Message) => {
+    client.on("message", (from: SessionInfo, message: Message, deliveryId: string) => {
       this.handleIncomingMessage(from, message);
+      client.acknowledgeMessage(deliveryId);
     });
     client.on("disconnected", (error: Error) => {
       for (const waiter of this.replyWaiters.values()) {
@@ -208,12 +209,12 @@ export class CodexIntercomRuntime {
       const onAbort = () => {
         this.replyWaiters.delete(replyTo);
         cleanup();
-        this.client?.cancelAsk(replyTo);
+        void this.client?.cancelAsk(replyTo);
         reject(new Error("intercom_ask cancelled"));
       };
       timeout = setTimeout(() => {
         this.replyWaiters.delete(replyTo);
-        this.client?.cancelAsk(replyTo);
+        void this.client?.deferAsk(replyTo);
         signal?.removeEventListener("abort", onAbort);
         reject(new Error(`No reply from "${from}" within ${Math.round(timeoutMs / 1000)} seconds`));
       }, timeoutMs);

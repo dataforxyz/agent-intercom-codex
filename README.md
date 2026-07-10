@@ -10,6 +10,13 @@ sessions on the same machine. It speaks the same local broker protocol as
 `pi-intercom`, so sessions can discover each other, send updates, ask blocking
 questions, read pending messages, and reply to asks.
 
+The bundled client and broker use strict intercom protocol v3. A send is only
+reported as delivered after the receiving adapter acknowledges it. Unfinished
+outbound sends are persisted under the shared intercom runtime directory and
+replayed with their original IDs after reconnect, making retries safe with
+receiver deduplication. Any v3 adapter can also replace an incompatible older
+local broker, so Pi does not need to start first.
+
 The project has two related pieces:
 
 - `codex-intercom-mcp`: an MCP server that exposes intercom tools inside a

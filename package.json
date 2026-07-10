@@ -1,6 +1,6 @@
 {
   "name": "codex-intercom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Codex MCP plugin for direct local messaging with Pi and Codex coding-agent sessions.",
   "license": "MIT",
   "type": "module",
@@ -17,11 +17,16 @@
     "assets/**/*",
     "dist/**/*",
     "codex/**/*.ts",
+    "!codex/**/*.test.ts",
     "broker/**/*.ts",
+    "!broker/**/*.test.ts",
     "scripts/**/*",
     "skills/**/*",
     "types.ts",
     "config.ts",
+    "tsconfig.json",
+    "durable-json.ts",
+    "outbound-outbox.ts",
     ".codex-plugin/**/*",
     ".mcp.json",
     "README.md",
@@ -33,7 +38,8 @@
     "codex:mcp": "tsx codex/server.ts",
     "codex:bridge": "tsx codex/bridge-daemon.ts",
     "coi": "tsx codex/coi.ts",
-    "test": "tsx --test broker/client.test.ts broker/framing.test.ts broker/paths.test.ts broker/spawn.test.ts codex/*.test.ts"
+    "test": "tsx --test broker/client.test.ts broker/framing.test.ts broker/paths.test.ts broker/spawn.test.ts outbound-outbox.test.ts codex/*.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "codex",
@@ -46,6 +52,7 @@
     "node-pty": "^1.1.0"
   },
   "devDependencies": {
+    "@types/node": "^24.0.0",
     "esbuild": "^0.28.1",
     "tsx": "^4.20.0",
     "typescript": "^6.0.3"

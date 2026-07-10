@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- Added protocol v3 delivery acknowledgements, explicit ask-control
+  confirmations, and a durable sender outbox that replays safely after broker
+  reconnects.
 - Added an `Alt+I` shortcut to `coi` that copies the current session's usable
   intercom contact target.
 - Added terminal-protocol, OSC 52, editor insertion, and stable-ID fallbacks for
@@ -10,6 +13,10 @@
   interception.
 
 ### Changed
+- Upgraded the bundled broker and client to the strict `pi-intercom` protocol
+  v3 and automatically replace an incompatible older local broker.
+- Ask timeouts now defer the ask, preserving late replies without holding the
+  reverse-ask edge blocked indefinitely. Explicit cancellation still closes it.
 - Made `node-pty` optional and clipboard helper execution asynchronous.
 
 ## [0.1.0] - 2026-07-03

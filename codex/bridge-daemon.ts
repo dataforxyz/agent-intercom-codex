@@ -244,8 +244,10 @@ export class VirtualCodexAgent {
   }
 
   async start(): Promise<void> {
-    this.client.on("message", (from: SessionInfo, message: Message) => {
-      void this.routeMessage(from, message).catch((error) => {
+    this.client.on("message", (from: SessionInfo, message: Message, deliveryId: string) => {
+      const routed = this.routeMessage(from, message);
+      this.client.acknowledgeMessage(deliveryId);
+      void routed.catch((error) => {
         this.client.updatePresence({ status: `error: ${error instanceof Error ? error.message : String(error)}` });
       });
     });
@@ -577,12 +579,12 @@ export class VirtualCodexAgent {
       const onAbort = () => {
         this.toolReplyWaiters.delete(replyTo);
         cleanup();
-        this.client.cancelAsk(replyTo);
+        void this.client.cancelAsk(replyTo);
         reject(new Error("intercom_ask cancelled"));
       };
       timeout = setTimeout(() => {
         this.toolReplyWaiters.delete(replyTo);
-        this.client.cancelAsk(replyTo);
+        void this.client.deferAsk(replyTo);
         signal?.removeEventListener("abort", onAbort);
         reject(new Error(`No reply from "${from}" within ${Math.round(timeoutMs / 1000)} seconds`));
       }, timeoutMs);
@@ -598,7 +600,7 @@ export class VirtualCodexAgent {
     waiter.cleanup?.();
     this.toolReplyWaiters.delete(replyTo);
     waiter.reject(error);
-    this.client.cancelAsk(replyTo);
+    void this.client.cancelAsk(replyTo);
   }
 }
 

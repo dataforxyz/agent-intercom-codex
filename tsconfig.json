@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "target": "ES2022",
+    "types": ["node"]
+  },
+  "include": ["*.ts", "broker/**/*.ts", "codex/**/*.ts"],
+  "exclude": ["node_modules", "**/*.test.ts"]
+}

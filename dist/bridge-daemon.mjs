@@ -2,7 +2,7 @@
 
 // codex/bridge-daemon.ts
 import { once } from "node:events";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 import { basename } from "node:path";
 
 // codex/app-server-client.ts
@@ -104,14 +104,14 @@ var CodexAppServerClient = class extends EventEmitter {
       this.socket = null;
       this.initialized = false;
       this.failAll(new Error("Codex app-server client disconnected"));
-      await new Promise((resolve3) => {
+      await new Promise((resolve4) => {
         const timeout = setTimeout(() => {
           socket.destroy();
-          resolve3();
+          resolve4();
         }, 1e3);
         socket.once("close", () => {
           clearTimeout(timeout);
-          resolve3();
+          resolve4();
         });
         if (!socket.destroyed) {
           this.writeWebSocketFrame(8, Buffer.alloc(0));
@@ -127,14 +127,14 @@ var CodexAppServerClient = class extends EventEmitter {
     this.initialized = false;
     this.failAll(new Error("Codex app-server client disconnected"));
     if (!proc) return;
-    await new Promise((resolve3) => {
+    await new Promise((resolve4) => {
       const timeout = setTimeout(() => {
         proc.kill("SIGKILL");
-        resolve3();
+        resolve4();
       }, 2e3);
       proc.once("exit", () => {
         clearTimeout(timeout);
-        resolve3();
+        resolve4();
       });
       proc.stdin.end();
       proc.kill("SIGTERM");
@@ -159,12 +159,12 @@ var CodexAppServerClient = class extends EventEmitter {
     }
     const id = this.nextId++;
     const payload = params === void 0 ? { id, method } : { id, method, params };
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Codex app-server request timed out: ${method}`));
       }, timeoutMs);
-      this.pending.set(id, { resolve: resolve3, reject, timeout });
+      this.pending.set(id, { resolve: resolve4, reject, timeout });
       this.writePayload(payload);
     });
   }
@@ -222,7 +222,7 @@ var CodexAppServerClient = class extends EventEmitter {
   connectUnixWebSocketOnce() {
     const socketPath = this.options.socketPath;
     if (!socketPath) return Promise.reject(new Error("socketPath is required for unix-websocket transport"));
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       const key = randomBytes(16).toString("base64");
       const expectedAccept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
       const socket = net.createConnection(socketPath);
@@ -260,7 +260,7 @@ var CodexAppServerClient = class extends EventEmitter {
         socket.on("error", (error) => fail(error));
         socket.on("close", () => fail(new Error("Codex app-server WebSocket closed")));
         if (rest.length) this.handleWebSocketData(rest);
-        resolve3();
+        resolve4();
       };
       const cleanupHandshake = () => {
         socket.off("data", onData);
@@ -468,29 +468,67 @@ var WebSocketFrameDecoder = class {
 };
 
 // codex/bridge-config.ts
-import { existsSync, mkdirSync as mkdirSync2, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join as join2, resolve } from "node:path";
+import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync } from "node:fs";
+import { dirname, join as join2, resolve as resolve2 } from "node:path";
 import { cwd as processCwd } from "node:process";
 
 // broker/paths.ts
-import { chmodSync, mkdirSync } from "fs";
-import { join } from "path";
+import { chmodSync, mkdirSync, readFileSync } from "fs";
+import { isAbsolute, join, resolve } from "path";
 import { homedir } from "os";
 var INTERCOM_DIR_MODE = 448;
 var INTERCOM_RUNTIME_FILE_MODE = 384;
+var INTERCOM_TCP_HOST = "127.0.0.1";
 var INTERCOM_PROTOCOL_NAME = "pi-intercom";
-var INTERCOM_PROTOCOL_VERSION = 2;
+var INTERCOM_PROTOCOL_VERSION = 3;
 function sanitizePipeSegment(value) {
   return value.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "default";
 }
-function getIntercomDirPath(homeDir = homedir()) {
-  return join(homeDir, ".pi/agent/intercom");
-}
-function getBrokerSocketPath(platform = process.platform, homeDir = homedir()) {
-  if (platform === "win32") {
-    return `\\\\.\\pipe\\pi-intercom-${sanitizePipeSegment(homeDir)}`;
+function getAgentDirPath(env = process.env, homeDir = homedir(), cwd = process.cwd()) {
+  const configured = env.PI_CODING_AGENT_DIR?.trim();
+  if (!configured) {
+    return join(homeDir, ".pi/agent");
   }
-  return join(getIntercomDirPath(homeDir), "broker.sock");
+  return isAbsolute(configured) ? configured : resolve(cwd, configured);
+}
+function getIntercomDirPath(agentDir = getAgentDirPath()) {
+  return join(agentDir, "intercom");
+}
+function shouldUseWindowsTcpTransport(platform = process.platform, env = process.env) {
+  if (platform !== "win32") {
+    return false;
+  }
+  const transport = env.PI_INTERCOM_TRANSPORT?.trim().toLowerCase();
+  if (transport === "tcp") {
+    return true;
+  }
+  const legacyOptIn = env.PI_INTERCOM_TCP?.trim().toLowerCase();
+  return legacyOptIn === "1" || legacyOptIn === "true";
+}
+function getBrokerPortFilePath(intercomDir = getIntercomDirPath()) {
+  return join(intercomDir, "broker.port.json");
+}
+function getBrokerSocketPath(platform = process.platform, agentDir = getAgentDirPath()) {
+  if (platform === "win32") {
+    return `\\\\.\\pipe\\pi-intercom-${sanitizePipeSegment(agentDir)}`;
+  }
+  return join(getIntercomDirPath(agentDir), "broker.sock");
+}
+function getBrokerConnectTarget(platform = process.platform, env = process.env, intercomDir = getIntercomDirPath(getAgentDirPath(env))) {
+  if (shouldUseWindowsTcpTransport(platform, env)) {
+    const endpointFile = getBrokerPortFilePath(intercomDir);
+    const raw = readFileSync(endpointFile, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error(`Invalid intercom TCP endpoint at ${endpointFile}: expected a JSON object`);
+    }
+    const endpoint = parsed;
+    if (endpoint.transport !== "tcp" || endpoint.host !== INTERCOM_TCP_HOST || typeof endpoint.port !== "number" || !Number.isSafeInteger(endpoint.port) || endpoint.port <= 0 || endpoint.port > 65535 || typeof endpoint.stateId !== "string" || endpoint.stateId.length === 0) {
+      throw new Error(`Invalid intercom TCP endpoint at ${endpointFile}`);
+    }
+    return { transport: "tcp", host: endpoint.host, port: endpoint.port, stateId: endpoint.stateId };
+  }
+  return getBrokerSocketPath(platform, getAgentDirPath(env));
 }
 function ensureIntercomRuntimeDir(intercomDir = getIntercomDirPath(), platform = process.platform) {
   mkdirSync(intercomDir, { recursive: true, mode: INTERCOM_DIR_MODE });
@@ -528,7 +566,7 @@ function normalizeAgent(raw, index) {
   return {
     id,
     name,
-    cwd: resolve(optionalString(raw.cwd, `agents[${index}].cwd`) ?? processCwd()),
+    cwd: resolve2(optionalString(raw.cwd, `agents[${index}].cwd`) ?? processCwd()),
     model: optionalString(raw.model, `agents[${index}].model`),
     threadId: optionalString(raw.threadId, `agents[${index}].threadId`),
     instructions: optionalString(raw.instructions, `agents[${index}].instructions`),
@@ -543,7 +581,7 @@ function defaultBridgeConfig(env = process.env) {
     agents: [{
       id,
       name: env.CODEX_INTERCOM_BRIDGE_NAME?.trim() || id,
-      cwd: resolve(env.CODEX_INTERCOM_BRIDGE_CWD?.trim() || processCwd()),
+      cwd: resolve2(env.CODEX_INTERCOM_BRIDGE_CWD?.trim() || processCwd()),
       model: env.CODEX_INTERCOM_BRIDGE_MODEL?.trim() || void 0,
       instructions: env.CODEX_INTERCOM_BRIDGE_INSTRUCTIONS?.trim() || void 0
     }]
@@ -551,7 +589,7 @@ function defaultBridgeConfig(env = process.env) {
 }
 function loadBridgeConfig(path = process.env.CODEX_INTERCOM_BRIDGE_CONFIG || DEFAULT_BRIDGE_CONFIG_PATH) {
   if (!existsSync(path)) return defaultBridgeConfig();
-  const parsed = JSON.parse(readFileSync(path, "utf8"));
+  const parsed = JSON.parse(readFileSync2(path, "utf8"));
   if (!isRecord(parsed)) throw new Error("Bridge config must be a JSON object");
   if (!Array.isArray(parsed.agents)) throw new Error("Bridge config requires an agents array");
   const appServer = isRecord(parsed.appServer) ? {
@@ -564,14 +602,14 @@ function loadBridgeConfig(path = process.env.CODEX_INTERCOM_BRIDGE_CONFIG || DEF
     startDaemonArgs: Array.isArray(parsed.appServer.startDaemonArgs) ? parsed.appServer.startDaemonArgs.map((arg, index) => requireString(arg, `appServer.startDaemonArgs[${index}]`)) : void 0
   } : void 0;
   return {
-    statePath: resolve(optionalString(parsed.statePath, "statePath") ?? DEFAULT_BRIDGE_STATE_PATH),
+    statePath: resolve2(optionalString(parsed.statePath, "statePath") ?? DEFAULT_BRIDGE_STATE_PATH),
     agents: parsed.agents.map(normalizeAgent),
     ...appServer ? { appServer } : {}
   };
 }
 function loadBridgeState(path) {
   if (!existsSync(path)) return { agents: {} };
-  const parsed = JSON.parse(readFileSync(path, "utf8"));
+  const parsed = JSON.parse(readFileSync2(path, "utf8"));
   if (!isRecord(parsed) || !isRecord(parsed.agents)) return { agents: {} };
   const agents = {};
   for (const [id, value] of Object.entries(parsed.agents)) {
@@ -593,7 +631,7 @@ function saveBridgeState(path, state) {
 // broker/client.ts
 import { EventEmitter as EventEmitter2 } from "events";
 import net2 from "net";
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 
 // broker/framing.ts
 var MAX_FRAME_BYTES = 1024 * 1024;
@@ -659,10 +697,127 @@ function createMessageReader(onMessage, onError, maxFrameBytes = MAX_FRAME_BYTES
   };
 }
 
+// outbound-outbox.ts
+import { createHash as createHash2 } from "crypto";
+import { chmodSync as chmodSync2, existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync as renameSync2 } from "fs";
+import { join as join3 } from "path";
+
+// durable-json.ts
+import { randomUUID } from "crypto";
+import { closeSync, fsyncSync, openSync, renameSync, writeFileSync as writeFileSync2 } from "fs";
+import { dirname as dirname2 } from "path";
+function writeDurableJson(filePath, value) {
+  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync2(temporaryPath, JSON.stringify(value), { encoding: "utf-8", mode: INTERCOM_RUNTIME_FILE_MODE });
+  const fileDescriptor = openSync(temporaryPath, "r");
+  try {
+    fsyncSync(fileDescriptor);
+  } finally {
+    closeSync(fileDescriptor);
+  }
+  renameSync(temporaryPath, filePath);
+  restrictIntercomRuntimeFile(filePath);
+  if (process.platform !== "win32") {
+    const directoryDescriptor = openSync(dirname2(filePath), "r");
+    try {
+      fsyncSync(directoryDescriptor);
+    } finally {
+      closeSync(directoryDescriptor);
+    }
+  }
+}
+
+// outbound-outbox.ts
+var OUTBOX_STATE_VERSION = 1;
+var MAX_OUTBOX_MESSAGES = 256;
+function fingerprint(entry) {
+  return JSON.stringify({
+    to: entry.to,
+    replyTo: entry.message.replyTo,
+    expectsReply: entry.message.expectsReply,
+    content: entry.message.content
+  });
+}
+function isStoredOutboundMessage(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const entry = value;
+  if (typeof entry.to !== "string" || typeof entry.queuedAt !== "number") return false;
+  if (typeof entry.message !== "object" || entry.message === null || Array.isArray(entry.message)) return false;
+  const message = entry.message;
+  return typeof message.id === "string" && typeof message.timestamp === "number" && typeof message.content === "object" && message.content !== null && typeof message.content.text === "string";
+}
+function fileName(sessionId) {
+  return `${createHash2("sha256").update(sessionId).digest("hex")}.json`;
+}
+var PersistentOutboundOutbox = class {
+  directory;
+  filePath;
+  state;
+  constructor(sessionId, intercomDir = getIntercomDirPath()) {
+    ensureIntercomRuntimeDir(intercomDir);
+    this.directory = join3(intercomDir, "outbox");
+    mkdirSync3(this.directory, { recursive: true, mode: INTERCOM_DIR_MODE });
+    if (process.platform !== "win32") chmodSync2(this.directory, INTERCOM_DIR_MODE);
+    this.filePath = join3(this.directory, fileName(sessionId));
+    this.state = this.load();
+  }
+  list() {
+    return this.state.entries.map((entry) => ({ ...entry, message: { ...entry.message, content: { ...entry.message.content } } }));
+  }
+  enqueue(to, message) {
+    const existing = this.state.entries.find((entry) => entry.message.id === message.id);
+    if (existing) {
+      if (fingerprint(existing) !== fingerprint({ to, message })) {
+        throw new Error(`Message ID ${message.id} is already queued with a different payload`);
+      }
+      return "existing";
+    }
+    if (this.state.entries.length >= MAX_OUTBOX_MESSAGES) {
+      throw new Error(`Durable outbox is full (${MAX_OUTBOX_MESSAGES} messages)`);
+    }
+    this.state.entries.push({ to, message, queuedAt: Date.now() });
+    this.persist();
+    return "added";
+  }
+  remove(messageId) {
+    const remaining = this.state.entries.filter((entry) => entry.message.id !== messageId);
+    if (remaining.length === this.state.entries.length) return;
+    this.state.entries = remaining;
+    this.persist();
+  }
+  clear() {
+    if (this.state.entries.length === 0) return;
+    this.state.entries = [];
+    this.persist();
+  }
+  load() {
+    if (!existsSync2(this.filePath)) return { version: OUTBOX_STATE_VERSION, entries: [] };
+    try {
+      const parsed = JSON.parse(readFileSync3(this.filePath, "utf-8"));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("expected object");
+      const state = parsed;
+      if (state.version !== OUTBOX_STATE_VERSION || !Array.isArray(state.entries) || !state.entries.every(isStoredOutboundMessage)) {
+        throw new Error("invalid outbox state");
+      }
+      return { version: OUTBOX_STATE_VERSION, entries: state.entries };
+    } catch {
+      const corruptPath = `${this.filePath}.corrupt-${Date.now()}`;
+      renameSync2(this.filePath, corruptPath);
+      restrictIntercomRuntimeFile(corruptPath);
+      return { version: OUTBOX_STATE_VERSION, entries: [] };
+    }
+  }
+  persist() {
+    writeDurableJson(this.filePath, this.state);
+  }
+};
+
 // broker/client.ts
-var BROKER_SOCKET = getBrokerSocketPath();
 function toError(error) {
   return error instanceof Error ? error : new Error(String(error));
+}
+function connectToBrokerTarget(target) {
+  return typeof target === "string" ? net2.connect(target) : net2.connect({ host: target.host, port: target.port });
 }
 function isAttachment(value) {
   if (typeof value !== "object" || value === null) {
@@ -711,13 +866,21 @@ function isSessionInfo(value) {
   if (session.name !== void 0 && typeof session.name !== "string") {
     return false;
   }
-  return session.status === void 0 || typeof session.status === "string";
+  if (session.status !== void 0 && typeof session.status !== "string") {
+    return false;
+  }
+  if (session.peerUid !== void 0 && typeof session.peerUid !== "number") {
+    return false;
+  }
+  return session.trustedLocal === void 0 || typeof session.trustedLocal === "boolean";
 }
 var IntercomClient = class extends EventEmitter2 {
   socket = null;
   _sessionId = null;
   pendingSends = /* @__PURE__ */ new Map();
   pendingLists = /* @__PURE__ */ new Map();
+  pendingAskControls = /* @__PURE__ */ new Map();
+  outbox = null;
   disconnecting = false;
   disconnectError = null;
   failPending(error) {
@@ -729,9 +892,17 @@ var IntercomClient = class extends EventEmitter2 {
       pending.reject(error);
     }
     this.pendingLists.clear();
+    for (const pending of this.pendingAskControls.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve(false);
+    }
+    this.pendingAskControls.clear();
   }
   get sessionId() {
     return this._sessionId;
+  }
+  get outboxSize() {
+    return this.outbox?.list().length ?? 0;
   }
   isConnected() {
     const socket = this.socket;
@@ -754,8 +925,16 @@ var IntercomClient = class extends EventEmitter2 {
     if (this.socket) {
       return Promise.reject(new Error("Already connected"));
     }
-    return new Promise((resolve3, reject) => {
-      const socket = net2.connect(BROKER_SOCKET);
+    return new Promise((resolve4, reject) => {
+      let socket;
+      let target;
+      try {
+        target = getBrokerConnectTarget();
+        socket = connectToBrokerTarget(target);
+      } catch (error) {
+        reject(toError(error));
+        return;
+      }
       this.socket = socket;
       this.disconnectError = null;
       let settled = false;
@@ -775,7 +954,7 @@ var IntercomClient = class extends EventEmitter2 {
         settled = true;
         connectionEstablished = true;
         cleanupConnectionAttempt();
-        resolve3();
+        resolve4();
       };
       const onError = (err) => {
         settled = true;
@@ -787,7 +966,6 @@ var IntercomClient = class extends EventEmitter2 {
         socket.destroy();
         reject(err);
       };
-      const onRegistrationError = (err) => onError(err);
       const onClose = () => {
         const wasConnecting = !settled && !this._sessionId;
         const wasDisconnecting = this.disconnecting;
@@ -829,7 +1007,6 @@ var IntercomClient = class extends EventEmitter2 {
       }, onReaderError);
       const cleanupConnectionAttempt = () => {
         this.off("_registered", onRegistered);
-        this.off("_registration_error", onRegistrationError);
         socket.off("error", onError);
         clearTimeout(timeout);
       };
@@ -843,14 +1020,14 @@ var IntercomClient = class extends EventEmitter2 {
       socket.on("close", onClose);
       socket.on("error", onSocketError);
       this.once("_registered", onRegistered);
-      this.once("_registration_error", onRegistrationError);
       try {
         writeMessage(socket, {
           type: "register",
           protocol: INTERCOM_PROTOCOL_NAME,
           version: INTERCOM_PROTOCOL_VERSION,
           session,
-          ...sessionId ? { sessionId } : {}
+          ...sessionId ? { sessionId } : {},
+          ...typeof target === "string" ? {} : { stateId: target.stateId }
         });
       } catch (error) {
         cleanupConnectionAttempt();
@@ -873,13 +1050,15 @@ var IntercomClient = class extends EventEmitter2 {
     }
     switch (brokerMessage.type) {
       case "registered": {
-        if (typeof brokerMessage.sessionId !== "string" || brokerMessage.protocol !== void 0 && brokerMessage.protocol !== INTERCOM_PROTOCOL_NAME || brokerMessage.version !== void 0 && brokerMessage.version !== INTERCOM_PROTOCOL_VERSION) {
+        if (typeof brokerMessage.sessionId !== "string" || brokerMessage.protocol !== INTERCOM_PROTOCOL_NAME || brokerMessage.version !== INTERCOM_PROTOCOL_VERSION) {
           throw new Error("Invalid registered message");
         }
         if (this._sessionId !== null) {
           throw new Error("Received duplicate registered message");
         }
         this._sessionId = brokerMessage.sessionId;
+        this.outbox = new PersistentOutboundOutbox(brokerMessage.sessionId);
+        this.replayOutbox();
         this.emit("_registered", { type: "registered", sessionId: brokerMessage.sessionId });
         break;
       }
@@ -898,16 +1077,10 @@ var IntercomClient = class extends EventEmitter2 {
       }
       case "message": {
         const { deliveryId, from, message } = brokerMessage;
-        if (deliveryId !== void 0 && typeof deliveryId !== "string" || !isSessionInfo(from) || !isMessage(message)) {
+        if (typeof deliveryId !== "string" || !isSessionInfo(from) || !isMessage(message)) {
           throw new Error("Invalid message event");
         }
         this.emit("message", from, message, deliveryId);
-        if (typeof deliveryId === "string") {
-          const socket = this.socket;
-          if (socket && !socket.destroyed && !socket.writableEnded && socket.writable) {
-            writeMessage(socket, { type: "message_received", deliveryId });
-          }
-        }
         break;
       }
       case "delivery_accepted": {
@@ -915,37 +1088,49 @@ var IntercomClient = class extends EventEmitter2 {
         if (typeof deliveryId !== "string" || typeof messageId !== "string") {
           throw new Error("Invalid delivery_accepted message");
         }
-        break;
-      }
-      case "delivered": {
-        const { deliveryId, messageId } = brokerMessage;
-        if (typeof messageId !== "string" || deliveryId !== void 0 && typeof deliveryId !== "string") {
-          throw new Error("Invalid delivered message");
-        }
         const pending = this.pendingSends.get(messageId);
         if (!pending) {
           return;
         }
+        pending.accepted = true;
+        pending.deliveryId = deliveryId;
+        this.emit("delivery_accepted", messageId, deliveryId);
+        break;
+      }
+      case "delivered": {
+        const { deliveryId, messageId } = brokerMessage;
+        if (typeof deliveryId !== "string" || typeof messageId !== "string") {
+          throw new Error("Invalid delivered message");
+        }
+        this.outbox?.remove(messageId);
+        const pending = this.pendingSends.get(messageId);
+        if (!pending) {
+          this.emit("outbox_delivered", messageId, deliveryId);
+          return;
+        }
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, accepted: true, delivered: true, ...deliveryId ? { deliveryId } : {} });
+        pending.resolve({ id: messageId, accepted: true, delivered: true, deliveryId });
         break;
       }
       case "delivery_failed": {
         const { accepted, code, messageId, reason } = brokerMessage;
-        if (typeof messageId !== "string" || typeof reason !== "string" || accepted !== void 0 && typeof accepted !== "boolean" || code !== void 0 && typeof code !== "string") {
+        if (typeof accepted !== "boolean" || typeof code !== "string" || typeof messageId !== "string" || typeof reason !== "string") {
           throw new Error("Invalid delivery_failed message");
         }
+        this.outbox?.remove(messageId);
         const pending = this.pendingSends.get(messageId);
         if (!pending) {
+          this.emit("outbox_failed", messageId, code, reason);
           return;
         }
         this.pendingSends.delete(messageId);
         pending.resolve({
           id: messageId,
-          ...accepted !== void 0 ? { accepted } : {},
+          accepted,
           delivered: false,
-          ...code ? { code } : {},
-          reason
+          code,
+          reason,
+          ...pending.deliveryId ? { deliveryId: pending.deliveryId } : {}
         });
         break;
       }
@@ -967,10 +1152,14 @@ var IntercomClient = class extends EventEmitter2 {
       }
       case "ask_control_result": {
         const { action, applied, messageId, requestId } = brokerMessage;
-        if (action !== "cancel" || typeof applied !== "boolean" || typeof messageId !== "string" || typeof requestId !== "string") {
+        if (action !== "defer" && action !== "cancel" || typeof applied !== "boolean" || typeof messageId !== "string" || typeof requestId !== "string") {
           throw new Error("Invalid ask_control_result message");
         }
-        this.emit("ask_control_result", requestId, messageId, applied);
+        const pending = this.pendingAskControls.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingAskControls.delete(requestId);
+        pending.resolve(applied);
         break;
       }
       case "session_joined": {
@@ -995,15 +1184,16 @@ var IntercomClient = class extends EventEmitter2 {
         break;
       }
       case "error": {
-        if (typeof brokerMessage.error !== "string") {
+        if (typeof brokerMessage.code !== "string" || typeof brokerMessage.error !== "string") {
           throw new Error("Invalid error message");
         }
-        const error = new Error(brokerMessage.error);
-        if (typeof brokerMessage.code === "string") error.code = brokerMessage.code;
         if (this._sessionId === null) {
-          this.emit("_registration_error", error);
-          break;
+          const error2 = new Error(brokerMessage.error);
+          error2.code = brokerMessage.code;
+          throw error2;
         }
+        const error = new Error(brokerMessage.error);
+        error.code = brokerMessage.code;
         this.emit("error", error);
         break;
       }
@@ -1011,7 +1201,7 @@ var IntercomClient = class extends EventEmitter2 {
         throw new Error(`Unknown broker message type: ${brokerMessage.type}`);
     }
   }
-  async disconnect() {
+  async disconnect(preserveAsks = false) {
     const socket = this.socket;
     if (!socket) {
       return;
@@ -1019,7 +1209,8 @@ var IntercomClient = class extends EventEmitter2 {
     this.disconnecting = true;
     this.disconnectError = null;
     this.failPending(new Error("Client disconnected"));
-    await new Promise((resolve3) => {
+    if (!preserveAsks) this.outbox?.clear();
+    await new Promise((resolve4) => {
       let settled = false;
       const finish = () => {
         if (settled) {
@@ -1029,7 +1220,7 @@ var IntercomClient = class extends EventEmitter2 {
         clearTimeout(timeout);
         socket.off("close", onClose);
         socket.off("error", onError);
-        resolve3();
+        resolve4();
       };
       const onClose = () => finish();
       const onError = () => {
@@ -1041,7 +1232,7 @@ var IntercomClient = class extends EventEmitter2 {
       socket.once("close", onClose);
       socket.once("error", onError);
       try {
-        writeMessage(socket, { type: "unregister" });
+        writeMessage(socket, { type: "unregister", ...preserveAsks ? { preserveAsks: true } : {} });
         socket.end();
       } catch {
         socket.destroy();
@@ -1055,11 +1246,11 @@ var IntercomClient = class extends EventEmitter2 {
     } catch (error) {
       return Promise.reject(toError(error));
     }
-    return new Promise((resolve3, reject) => {
-      const requestId = randomUUID();
+    return new Promise((resolve4, reject) => {
+      const requestId = randomUUID2();
       const wrappedResolve = (sessions) => {
         clearTimeout(timeout);
-        resolve3(sessions);
+        resolve4(sessions);
       };
       const wrappedReject = (error) => {
         clearTimeout(timeout);
@@ -1088,7 +1279,16 @@ var IntercomClient = class extends EventEmitter2 {
     } catch (error) {
       return Promise.reject(toError(error));
     }
-    const messageId = options.messageId ?? randomUUID();
+    const messageId = options.messageId ?? randomUUID2();
+    if (this.pendingSends.has(messageId)) {
+      return Promise.resolve({
+        id: messageId,
+        accepted: false,
+        delivered: false,
+        code: "DUPLICATE_MESSAGE_ID",
+        reason: `Message ID ${messageId} is already pending`
+      });
+    }
     const message = {
       id: messageId,
       timestamp: Date.now(),
@@ -1099,10 +1299,15 @@ var IntercomClient = class extends EventEmitter2 {
         attachments: options.attachments
       }
     };
-    return new Promise((resolve3, reject) => {
+    try {
+      this.outbox?.enqueue(to, message);
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+    return new Promise((resolve4, reject) => {
       const wrappedResolve = (result) => {
         clearTimeout(timeout);
-        resolve3(result);
+        resolve4(result);
       };
       const wrappedReject = (error) => {
         clearTimeout(timeout);
@@ -1114,7 +1319,11 @@ var IntercomClient = class extends EventEmitter2 {
           wrappedReject(new Error("Send timeout"));
         }
       }, 1e4);
-      this.pendingSends.set(messageId, { resolve: wrappedResolve, reject: wrappedReject });
+      this.pendingSends.set(messageId, {
+        accepted: false,
+        resolve: wrappedResolve,
+        reject: wrappedReject
+      });
       try {
         writeMessage(socket, { type: "send", to, message });
       } catch (error) {
@@ -1124,17 +1333,59 @@ var IntercomClient = class extends EventEmitter2 {
       }
     });
   }
+  acknowledgeMessage(deliveryId) {
+    return this.writeControlMessage({ type: "message_received", deliveryId });
+  }
+  rejectMessage(deliveryId, reason) {
+    return this.writeControlMessage({ type: "message_rejected", deliveryId, code: "CONFLICTING_MESSAGE_ID", reason });
+  }
+  deferAsk(messageId) {
+    return this.sendAskControl("defer", messageId);
+  }
   cancelAsk(messageId) {
+    return this.sendAskControl("cancel", messageId);
+  }
+  sendAskControl(action, messageId) {
+    const requestId = randomUUID2();
+    return new Promise((resolve4) => {
+      const timeout = setTimeout(() => {
+        this.pendingAskControls.delete(requestId);
+        resolve4(false);
+      }, 2e3);
+      timeout.unref?.();
+      this.pendingAskControls.set(requestId, { resolve: resolve4, timeout });
+      if (!this.writeControlMessage({ type: action === "defer" ? "defer_ask" : "cancel_ask", requestId, messageId })) {
+        clearTimeout(timeout);
+        this.pendingAskControls.delete(requestId);
+        resolve4(false);
+      }
+    });
+  }
+  writeControlMessage(message) {
     if (this.disconnecting) {
-      return;
+      return false;
     }
     const socket = this.socket;
     if (!socket || !this._sessionId || socket.destroyed || socket.writableEnded || !socket.writable) {
-      return;
+      return false;
     }
     try {
-      writeMessage(socket, { type: "cancel_ask", requestId: randomUUID(), messageId });
+      writeMessage(socket, message);
+      return true;
     } catch {
+      return false;
+    }
+  }
+  replayOutbox() {
+    const socket = this.socket;
+    if (!socket || !this._sessionId || socket.destroyed || socket.writableEnded || !socket.writable) return;
+    for (const entry of this.outbox?.list() ?? []) {
+      if (this.pendingSends.has(entry.message.id)) continue;
+      try {
+        writeMessage(socket, { type: "send", to: entry.to, message: entry.message });
+      } catch {
+        return;
+      }
     }
   }
   updatePresence(updates) {
@@ -1151,60 +1402,42 @@ var IntercomClient = class extends EventEmitter2 {
 
 // broker/spawn.ts
 import { spawn as spawn2 } from "child_process";
-import { existsSync as existsSync2, readFileSync as readFileSync2, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
-import { join as join3, dirname as dirname2 } from "path";
+import { existsSync as existsSync3, readFileSync as readFileSync4, unlinkSync, writeFileSync as writeFileSync3 } from "fs";
+import { join as join4, dirname as dirname3 } from "path";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import net3 from "net";
+import { randomUUID as randomUUID3 } from "crypto";
 var INTERCOM_DIR = getIntercomDirPath();
-var EXTENSION_DIR = join3(dirname2(fileURLToPath(import.meta.url)), "..");
-var BROKER_SOCKET2 = getBrokerSocketPath();
-var BROKER_PID = join3(INTERCOM_DIR, "broker.pid");
-var BROKER_SPAWN_LOCK = join3(INTERCOM_DIR, "broker.spawn.lock");
+var EXTENSION_DIR = join4(dirname3(fileURLToPath(import.meta.url)), "..");
+var BROKER_PID = join4(INTERCOM_DIR, "broker.pid");
+var BROKER_SPAWN_LOCK = join4(INTERCOM_DIR, "broker.spawn.lock");
 function sleep(ms) {
-  return new Promise((resolve3) => setTimeout(resolve3, ms));
+  return new Promise((resolve4) => setTimeout(resolve4, ms));
 }
 function getTsxCliPath(extensionDir = EXTENSION_DIR) {
   try {
     const requireFromExtension = createRequire(import.meta.url);
     const tsxMain = requireFromExtension.resolve("tsx");
-    return join3(dirname2(tsxMain), "cli.mjs");
+    return join4(dirname3(tsxMain), "cli.mjs");
   } catch {
-    return join3(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
+    return join4(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
   }
 }
 function quoteWindowsArg(value) {
   return `"${value.replace(/"/g, '""')}"`;
 }
 function getWindowsHiddenLauncherPath(intercomDir = INTERCOM_DIR) {
-  return join3(intercomDir, "broker-launch.vbs");
+  return join4(intercomDir, "broker-launch.vbs");
 }
 function usesDefaultBrokerCommand(brokerCommand, brokerArgs) {
   return brokerCommand === "npx" && brokerArgs.length === 2 && brokerArgs[0] === "--no-install" && brokerArgs[1] === "tsx";
 }
-function getBrokerScriptPath(moduleUrl = import.meta.url) {
-  const currentDir = dirname2(fileURLToPath(moduleUrl));
-  const bundledBrokerPath = join3(currentDir, "broker.mjs");
-  if (existsSync2(bundledBrokerPath)) {
-    return bundledBrokerPath;
-  }
-  return join3(currentDir, "broker.ts");
-}
-function getEffectiveBrokerCommand(brokerPath, brokerCommand, brokerArgs, nodePath = process.execPath) {
-  if (brokerPath.endsWith(".mjs") && usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
-    return { command: nodePath, args: [] };
-  }
-  return { command: brokerCommand, args: brokerArgs };
-}
 function getWindowsBrokerCommandLine(brokerPath, extensionDir = EXTENSION_DIR, nodePath = process.execPath, brokerCommand = "npx", brokerArgs = ["--no-install", "tsx"]) {
-  const effective = getEffectiveBrokerCommand(brokerPath, brokerCommand, brokerArgs, nodePath);
-  if (effective.command === nodePath && effective.args.length === 0) {
-    return [quoteWindowsArg(nodePath), quoteWindowsArg(brokerPath)].join(" ");
-  }
-  if (usesDefaultBrokerCommand(effective.command, effective.args)) {
+  if (usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
     return [quoteWindowsArg(nodePath), quoteWindowsArg(getTsxCliPath(extensionDir)), quoteWindowsArg(brokerPath)].join(" ");
   }
-  return [quoteWindowsArg(effective.command), ...effective.args.map(quoteWindowsArg), quoteWindowsArg(brokerPath)].join(" ");
+  return [quoteWindowsArg(brokerCommand), ...brokerArgs.map(quoteWindowsArg), quoteWindowsArg(brokerPath)].join(" ");
 }
 function getWindowsHiddenLauncherScript(commandLine) {
   return [
@@ -1214,9 +1447,16 @@ function getWindowsHiddenLauncherScript(commandLine) {
     ""
   ].join("\r\n");
 }
+function isBrokerHealthOkMessage(message, requestId) {
+  if (typeof message !== "object" || message === null || !("type" in message)) {
+    return false;
+  }
+  const response = message;
+  return response.type === "health_ok" && response.requestId === requestId && response.protocol === INTERCOM_PROTOCOL_NAME && response.version === INTERCOM_PROTOCOL_VERSION;
+}
 function writeWindowsHiddenLauncher(commandLine, launcherPath = getWindowsHiddenLauncherPath()) {
-  ensureIntercomRuntimeDir(dirname2(launcherPath));
-  writeFileSync2(launcherPath, getWindowsHiddenLauncherScript(commandLine), {
+  ensureIntercomRuntimeDir(dirname3(launcherPath));
+  writeFileSync3(launcherPath, getWindowsHiddenLauncherScript(commandLine), {
     encoding: "utf-8",
     mode: INTERCOM_RUNTIME_FILE_MODE
   });
@@ -1224,7 +1464,6 @@ function writeWindowsHiddenLauncher(commandLine, launcherPath = getWindowsHidden
   return launcherPath;
 }
 function getBrokerLaunchSpec(brokerPath, brokerCommand, brokerArgs, extensionDir = EXTENSION_DIR, platform = process.platform, intercomDir = INTERCOM_DIR, nodePath = process.execPath) {
-  const effective = getEffectiveBrokerCommand(brokerPath, brokerCommand, brokerArgs, nodePath);
   if (platform === "win32") {
     const launcherPath = getWindowsHiddenLauncherPath(intercomDir);
     return {
@@ -1232,21 +1471,28 @@ function getBrokerLaunchSpec(brokerPath, brokerCommand, brokerArgs, extensionDir
       command: "wscript.exe",
       args: [launcherPath],
       launcherPath,
-      launcherCommandLine: getWindowsBrokerCommandLine(brokerPath, extensionDir, nodePath, effective.command, effective.args)
+      launcherCommandLine: getWindowsBrokerCommandLine(brokerPath, extensionDir, nodePath, brokerCommand, brokerArgs)
+    };
+  }
+  if (usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
+    return {
+      kind: "direct",
+      command: nodePath,
+      args: [getTsxCliPath(extensionDir), brokerPath]
     };
   }
   return {
     kind: "direct",
-    command: effective.command,
-    args: [...effective.args, brokerPath]
+    command: brokerCommand,
+    args: [...brokerArgs, brokerPath]
   };
 }
-function getBrokerSpawnOptions(extensionDir = EXTENSION_DIR) {
+function getBrokerSpawnOptions(extensionDir = EXTENSION_DIR, env = process.env) {
   return {
     detached: true,
     stdio: "ignore",
     cwd: extensionDir,
-    env: { ...process.env, NODE_NO_WARNINGS: "1" },
+    env: { ...env, PI_CODING_AGENT_DIR: getAgentDirPath(env), NODE_NO_WARNINGS: "1" },
     windowsHide: true
   };
 }
@@ -1267,14 +1513,17 @@ async function spawnBrokerIfNeeded(brokerCommand, brokerArgs) {
     if (await isBrokerRunning()) {
       return;
     }
-    const brokerPath = getBrokerScriptPath();
+    if (await checkBrokerHealth() === "incompatible") {
+      await stopBrokerProcess();
+    }
+    const brokerPath = join4(dirname3(fileURLToPath(import.meta.url)), "broker.ts");
     const launch = getBrokerLaunchSpec(brokerPath, brokerCommand, brokerArgs);
     if (launch.kind === "windows-launcher") {
       writeWindowsHiddenLauncher(launch.launcherCommandLine, launch.launcherPath);
     }
     const child = spawn2(launch.command, launch.args, getBrokerSpawnOptions());
     child.unref();
-    await new Promise((resolve3, reject) => {
+    await new Promise((resolve4, reject) => {
       const cleanup = () => {
         child.off("error", onError);
         child.off("exit", onExit);
@@ -1298,7 +1547,7 @@ async function spawnBrokerIfNeeded(brokerCommand, brokerArgs) {
       child.once("exit", onExit);
       waitForBroker().then(() => {
         cleanup();
-        resolve3();
+        resolve4();
       }, (error) => {
         cleanup();
         reject(toError2(error));
@@ -1308,13 +1557,38 @@ async function spawnBrokerIfNeeded(brokerCommand, brokerArgs) {
     releaseSpawnLock();
   }
 }
+async function stopBrokerProcess(pidFile = BROKER_PID, timeoutMs = 3e3) {
+  if (!existsSync3(pidFile)) return;
+  let pid;
+  try {
+    pid = Number.parseInt(readFileSync4(pidFile, "utf-8").trim(), 10);
+  } catch {
+    return;
+  }
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      process.kill(pid, 0);
+      await sleep(50);
+    } catch {
+      return;
+    }
+  }
+  throw new Error(`Incompatible intercom broker ${pid} did not stop within ${timeoutMs}ms`);
+}
 async function isBrokerRunning() {
   if (await checkSocketConnectable()) {
     return true;
   }
-  if (!existsSync2(BROKER_PID)) return false;
+  if (!existsSync3(BROKER_PID)) return false;
   try {
-    const pid = parseInt(readFileSync2(BROKER_PID, "utf-8").trim(), 10);
+    const pid = parseInt(readFileSync4(BROKER_PID, "utf-8").trim(), 10);
     if (!Number.isFinite(pid)) return false;
     process.kill(pid, 0);
     return checkSocketConnectable();
@@ -1322,36 +1596,71 @@ async function isBrokerRunning() {
     return false;
   }
 }
-function checkSocketConnectable() {
-  return new Promise((resolve3) => {
-    const socket = net3.connect(BROKER_SOCKET2);
-    const finish = (isConnected) => {
+function connectToBrokerTarget2(target) {
+  return typeof target === "string" ? net3.connect(target) : net3.connect({ host: target.host, port: target.port });
+}
+async function checkSocketConnectable() {
+  return await checkBrokerHealth() === "compatible";
+}
+function checkBrokerHealth() {
+  return new Promise((resolve4) => {
+    let target;
+    try {
+      target = getBrokerConnectTarget();
+    } catch {
+      resolve4("unreachable");
+      return;
+    }
+    const socket = connectToBrokerTarget2(target);
+    const requestId = randomUUID3();
+    const expectedStateId = typeof target === "string" ? void 0 : target.stateId;
+    let settled = false;
+    const finish = (health) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
       clearTimeout(timeout);
       socket.off("connect", onConnect);
       socket.off("error", onError);
-      resolve3(isConnected);
+      socket.off("data", reader);
+      socket.destroy();
+      resolve4(health);
     };
     const onConnect = () => {
-      socket.end();
-      finish(true);
+      try {
+        writeMessage(socket, {
+          type: "health",
+          requestId,
+          ...expectedStateId ? { stateId: expectedStateId } : {}
+        });
+      } catch {
+        finish("unreachable");
+      }
     };
-    const onError = () => {
-      socket.destroy();
-      finish(false);
-    };
+    const onError = () => finish("unreachable");
+    const reader = createMessageReader((message) => {
+      if (isBrokerHealthOkMessage(message, requestId)) {
+        finish("compatible");
+        return;
+      }
+      if (typeof message === "object" && message !== null && "type" in message && message.type === "health_ok" && "requestId" in message && message.requestId === requestId) {
+        finish("incompatible");
+        return;
+      }
+      finish("unreachable");
+    }, () => finish("unreachable"));
     socket.on("connect", onConnect);
     socket.on("error", onError);
-    const timeout = setTimeout(() => {
-      socket.destroy();
-      finish(false);
-    }, 1e3);
+    socket.on("data", reader);
+    const timeout = setTimeout(() => finish("unreachable"), 1e3);
   });
 }
 function acquireSpawnLock() {
   const maxRetries = 5;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      writeFileSync2(BROKER_SPAWN_LOCK, `${process.pid}
+      writeFileSync3(BROKER_SPAWN_LOCK, `${process.pid}
 ${Date.now()}
 `, {
         flag: "wx",
@@ -1376,11 +1685,11 @@ ${Date.now()}
   return false;
 }
 function isSpawnLockStale() {
-  if (!existsSync2(BROKER_SPAWN_LOCK)) {
+  if (!existsSync3(BROKER_SPAWN_LOCK)) {
     return false;
   }
   try {
-    const [pidLine = "", createdAtLine = "0"] = readFileSync2(BROKER_SPAWN_LOCK, "utf-8").trim().split("\n");
+    const [pidLine = "", createdAtLine = "0"] = readFileSync4(BROKER_SPAWN_LOCK, "utf-8").trim().split("\n");
     const pid = Number.parseInt(pidLine, 10);
     const createdAt = Number.parseInt(createdAtLine, 10);
     const ageMs = Date.now() - createdAt;
@@ -1414,8 +1723,8 @@ async function waitForBroker(timeoutMs = 5e3) {
 }
 
 // config.ts
-import { existsSync as existsSync3, readFileSync as readFileSync3 } from "fs";
-import { join as join4, resolve as resolve2 } from "path";
+import { existsSync as existsSync4, readFileSync as readFileSync5 } from "fs";
+import { join as join5, resolve as resolve3 } from "path";
 import { homedir as homedir2 } from "os";
 var DEFAULT_ASK_TIMEOUT_MS = 45 * 1e3;
 var MAX_ASK_TIMEOUT_MS = 120 * 1e3;
@@ -1429,8 +1738,8 @@ function validateAskTimeoutMs(value, name = "timeout_ms") {
   return value;
 }
 function getConfigPath() {
-  const agentDir = process.env.PI_CODING_AGENT_DIR ? resolve2(process.env.PI_CODING_AGENT_DIR) : join4(homedir2(), ".pi", "agent");
-  return join4(agentDir, "intercom", "config.json");
+  const agentDir = process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join5(homedir2(), ".pi", "agent");
+  return join5(agentDir, "intercom", "config.json");
 }
 var defaults = {
   brokerCommand: "npx",
@@ -1447,11 +1756,11 @@ var defaults = {
 };
 function loadConfig() {
   const configPath = getConfigPath();
-  if (!existsSync3(configPath)) {
+  if (!existsSync4(configPath)) {
     return { ...defaults };
   }
   try {
-    const raw = readFileSync3(configPath, "utf-8");
+    const raw = readFileSync5(configPath, "utf-8");
     const parsed = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
       throw new Error("Config must be a JSON object");
@@ -1826,8 +2135,10 @@ var VirtualCodexAgent = class {
   toolMessageCountsByTurn = /* @__PURE__ */ new Map();
   toolMessageTimestamps = [];
   async start() {
-    this.client.on("message", (from, message) => {
-      void this.routeMessage(from, message).catch((error) => {
+    this.client.on("message", (from, message, deliveryId) => {
+      const routed = this.routeMessage(from, message);
+      this.client.acknowledgeMessage(deliveryId);
+      void routed.catch((error) => {
         this.client.updatePresence({ status: `error: ${error instanceof Error ? error.message : String(error)}` });
       });
     });
@@ -1889,7 +2200,7 @@ var VirtualCodexAgent = class {
       if (this.activeTurnId === turnId) this.activeTurnId = null;
       this.client.updatePresence({ status: "idle" });
       const idleWaiters = this.idleWaiters.splice(0);
-      for (const resolve3 of idleWaiters) resolve3();
+      for (const resolve4 of idleWaiters) resolve4();
       void this.finishTurn(turnId);
     }
   }
@@ -2005,14 +2316,14 @@ var VirtualCodexAgent = class {
   }
   waitUntilIdle() {
     if (!this.activeTurnId) return Promise.resolve();
-    return new Promise((resolve3) => {
-      this.idleWaiters.push(resolve3);
+    return new Promise((resolve4) => {
+      this.idleWaiters.push(resolve4);
     });
   }
   waitForTurnCompletion(turnId) {
-    return new Promise((resolve3) => {
+    return new Promise((resolve4) => {
       const waiters = this.turnCompletionWaiters.get(turnId) ?? [];
-      waiters.push(resolve3);
+      waiters.push(resolve4);
       this.turnCompletionWaiters.set(turnId, waiters);
     });
   }
@@ -2025,7 +2336,7 @@ var VirtualCodexAgent = class {
       this.toolMessageCountsByTurn.delete(turnId);
       const waiters = this.turnCompletionWaiters.get(turnId) ?? [];
       this.turnCompletionWaiters.delete(turnId);
-      for (const resolve3 of waiters) resolve3();
+      for (const resolve4 of waiters) resolve4();
     }
   }
   async handleToolCall(name, args, turnId, signal) {
@@ -2083,7 +2394,7 @@ Active sessions: ${sessions.length}`,
         const message = asString(args.message, "message");
         const timeoutMs = asOptionalPositiveInteger(args.timeout_ms, "timeout_ms") ?? DEFAULT_ASK_TIMEOUT_MS;
         const sendTo = await this.resolveTarget(to);
-        const questionId = randomUUID2();
+        const questionId = randomUUID4();
         const replyPromise = this.waitForToolReply(sendTo, questionId, timeoutMs, signal);
         void replyPromise.catch(() => void 0);
         const result = await this.client.send(sendTo, { messageId: questionId, text: message, expectsReply: true });
@@ -2123,7 +2434,7 @@ ${reply.content.text}${formatAttachments(reply.content.attachments)}`, { ok: tru
     return resolveSessionTarget(sessions, to) ?? to;
   }
   waitForToolReply(from, replyTo, timeoutMs = DEFAULT_ASK_TIMEOUT_MS, signal) {
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       if (signal?.aborted) {
         reject(new Error("intercom_ask cancelled"));
         return;
@@ -2136,17 +2447,17 @@ ${reply.content.text}${formatAttachments(reply.content.attachments)}`, { ok: tru
       const onAbort = () => {
         this.toolReplyWaiters.delete(replyTo);
         cleanup();
-        this.client.cancelAsk(replyTo);
+        void this.client.cancelAsk(replyTo);
         reject(new Error("intercom_ask cancelled"));
       };
       timeout = setTimeout(() => {
         this.toolReplyWaiters.delete(replyTo);
-        this.client.cancelAsk(replyTo);
+        void this.client.deferAsk(replyTo);
         signal?.removeEventListener("abort", onAbort);
         reject(new Error(`No reply from "${from}" within ${Math.round(timeoutMs / 1e3)} seconds`));
       }, timeoutMs);
       signal?.addEventListener("abort", onAbort, { once: true });
-      this.toolReplyWaiters.set(replyTo, { from, resolve: resolve3, reject, timeout, cleanup });
+      this.toolReplyWaiters.set(replyTo, { from, resolve: resolve4, reject, timeout, cleanup });
     });
   }
   rejectToolReply(replyTo, error) {
@@ -2156,7 +2467,7 @@ ${reply.content.text}${formatAttachments(reply.content.attachments)}`, { ok: tru
     waiter.cleanup?.();
     this.toolReplyWaiters.delete(replyTo);
     waiter.reject(error);
-    this.client.cancelAsk(replyTo);
+    void this.client.cancelAsk(replyTo);
   }
 };
 var CodexBridgeDaemon = class {

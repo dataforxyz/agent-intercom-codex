@@ -1,5 +1,6 @@
 import type { CodexIntercomRuntime, ToolResult } from "./runtime.ts";
 import { validateAskTimeoutMs } from "../config.ts";
+import type { Attachment } from "../types.ts";
 
 interface JsonRpcRequest {
   jsonrpc?: string;
@@ -36,7 +37,7 @@ function asOptionalPositiveInteger(value: unknown, name: string): number | undef
   return validateAskTimeoutMs(value, name);
 }
 
-function asAttachmentArray(value: unknown) {
+function asAttachmentArray(value: unknown): Attachment[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) throw new Error("attachments must be an array");
   return value.map((item, index) => {
@@ -47,7 +48,8 @@ function asAttachmentArray(value: unknown) {
     const name = asString(raw.name, `attachments[${index}].name`);
     const content = asString(raw.content, `attachments[${index}].content`);
     if (raw.language !== undefined && typeof raw.language !== "string") throw new Error(`attachments[${index}].language must be a string`);
-    return { type, name, content, ...(raw.language ? { language: raw.language } : {}) };
+    const language = typeof raw.language === "string" ? raw.language : undefined;
+    return { type, name, content, ...(language ? { language } : {}) };
   });
 }
 

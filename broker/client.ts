@@ -2,12 +2,23 @@ import { EventEmitter } from "events";
 import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
-import { getBrokerSocketPath, INTERCOM_PROTOCOL_NAME, INTERCOM_PROTOCOL_VERSION } from "./paths.ts";
-import type { SessionInfo, Message, Attachment } from "../types.ts";
+import { PersistentOutboundOutbox } from "../outbound-outbox.ts";
+import {
+  getBrokerConnectTarget,
+  INTERCOM_PROTOCOL_NAME,
+  INTERCOM_PROTOCOL_VERSION,
+  type BrokerConnectTarget,
+} from "./paths.ts";
+import type {
+  AskCancellationReason,
+  DeliveryFailureCode,
+  SessionInfo,
+  Message,
+  Attachment,
+  SessionRegistration,
+} from "../types.ts";
 
-const BROKER_SOCKET = getBrokerSocketPath();
-
-interface SendOptions {
+export interface SendOptions {
   text: string;
   attachments?: Attachment[];
   replyTo?: string;
@@ -15,17 +26,23 @@ interface SendOptions {
   messageId?: string;
 }
 
-interface SendResult {
+export interface SendResult {
   id: string;
-  accepted?: boolean;
+  accepted: boolean;
   delivered: boolean;
   deliveryId?: string;
-  code?: string;
+  code?: DeliveryFailureCode;
   reason?: string;
 }
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
+  return typeof target === "string"
+    ? net.connect(target)
+    : net.connect({ host: target.host, port: target.port });
 }
 
 function isAttachment(value: unknown): value is Attachment {
@@ -104,14 +121,29 @@ function isSessionInfo(value: unknown): value is SessionInfo {
     return false;
   }
 
-  return session.status === undefined || typeof session.status === "string";
+  if (session.status !== undefined && typeof session.status !== "string") {
+    return false;
+  }
+
+  if (session.peerUid !== undefined && typeof session.peerUid !== "number") {
+    return false;
+  }
+
+  return session.trustedLocal === undefined || typeof session.trustedLocal === "boolean";
 }
 
 export class IntercomClient extends EventEmitter {
   private socket: net.Socket | null = null;
   private _sessionId: string | null = null;
-  private pendingSends = new Map<string, { resolve: (r: SendResult) => void; reject: (e: Error) => void }>();
+  private pendingSends = new Map<string, {
+    accepted: boolean;
+    deliveryId?: string;
+    resolve: (r: SendResult) => void;
+    reject: (e: Error) => void;
+  }>();
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
+  private pendingAskControls = new Map<string, { resolve: (applied: boolean) => void; timeout: NodeJS.Timeout }>();
+  private outbox: PersistentOutboundOutbox | null = null;
   private disconnecting = false;
   private disconnectError: Error | null = null;
 
@@ -124,10 +156,19 @@ export class IntercomClient extends EventEmitter {
       pending.reject(error);
     }
     this.pendingLists.clear();
+    for (const pending of this.pendingAskControls.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve(false);
+    }
+    this.pendingAskControls.clear();
   }
 
   get sessionId(): string | null {
     return this._sessionId;
+  }
+
+  get outboxSize(): number {
+    return this.outbox?.list().length ?? 0;
   }
 
   isConnected(): boolean {
@@ -152,13 +193,21 @@ export class IntercomClient extends EventEmitter {
     return socket;
   }
 
-  connect(session: Omit<SessionInfo, "id">, sessionId?: string): Promise<void> {
+  connect(session: SessionRegistration, sessionId?: string): Promise<void> {
     if (this.socket) {
       return Promise.reject(new Error("Already connected"));
     }
 
     return new Promise((resolve, reject) => {
-      const socket = net.connect(BROKER_SOCKET);
+      let socket: net.Socket;
+      let target: BrokerConnectTarget;
+      try {
+        target = getBrokerConnectTarget();
+        socket = connectToBrokerTarget(target);
+      } catch (error) {
+        reject(toError(error));
+        return;
+      }
       this.socket = socket;
       this.disconnectError = null;
       let settled = false;
@@ -173,16 +222,16 @@ export class IntercomClient extends EventEmitter {
           reject(new Error("Connection timeout"));
         }
       }, 10000);
-
+      
       let connectionEstablished = false;
-
+      
       const onRegistered = () => {
         settled = true;
         connectionEstablished = true;
         cleanupConnectionAttempt();
         resolve();
       };
-
+      
       const onError = (err: Error) => {
         settled = true;
         cleanupConnectionAttempt();
@@ -193,9 +242,7 @@ export class IntercomClient extends EventEmitter {
         socket.destroy();
         reject(err);
       };
-
-      const onRegistrationError = (err: Error) => onError(err);
-
+      
       const onClose = () => {
         const wasConnecting = !settled && !this._sessionId;
         const wasDisconnecting = this.disconnecting;
@@ -238,10 +285,9 @@ export class IntercomClient extends EventEmitter {
       const reader = createMessageReader((msg) => {
         this.handleBrokerMessage(msg);
       }, onReaderError);
-
+      
       const cleanupConnectionAttempt = () => {
         this.off("_registered", onRegistered);
-        this.off("_registration_error", onRegistrationError);
         socket.off("error", onError);
         clearTimeout(timeout);
       };
@@ -251,15 +297,14 @@ export class IntercomClient extends EventEmitter {
         socket.off("error", onSocketError);
         socket.off("close", onClose);
       };
-
+      
       socket.on("data", reader);
       socket.on("error", onError);
       socket.on("close", onClose);
-
+      
       socket.on("error", onSocketError);
       this.once("_registered", onRegistered);
-      this.once("_registration_error", onRegistrationError);
-
+      
       try {
         writeMessage(socket, {
           type: "register",
@@ -267,6 +312,7 @@ export class IntercomClient extends EventEmitter {
           version: INTERCOM_PROTOCOL_VERSION,
           session,
           ...(sessionId ? { sessionId } : {}),
+          ...(typeof target === "string" ? {} : { stateId: target.stateId }),
         });
       } catch (error) {
         cleanupConnectionAttempt();
@@ -295,8 +341,8 @@ export class IntercomClient extends EventEmitter {
       case "registered": {
         if (
           typeof brokerMessage.sessionId !== "string"
-          || (brokerMessage.protocol !== undefined && brokerMessage.protocol !== INTERCOM_PROTOCOL_NAME)
-          || (brokerMessage.version !== undefined && brokerMessage.version !== INTERCOM_PROTOCOL_VERSION)
+          || brokerMessage.protocol !== INTERCOM_PROTOCOL_NAME
+          || brokerMessage.version !== INTERCOM_PROTOCOL_VERSION
         ) {
           throw new Error("Invalid registered message");
         }
@@ -306,6 +352,8 @@ export class IntercomClient extends EventEmitter {
         }
 
         this._sessionId = brokerMessage.sessionId;
+        this.outbox = new PersistentOutboundOutbox(brokerMessage.sessionId);
+        this.replayOutbox();
         this.emit("_registered", { type: "registered", sessionId: brokerMessage.sessionId });
         break;
       }
@@ -329,17 +377,11 @@ export class IntercomClient extends EventEmitter {
 
       case "message": {
         const { deliveryId, from, message } = brokerMessage;
-        if ((deliveryId !== undefined && typeof deliveryId !== "string") || !isSessionInfo(from) || !isMessage(message)) {
+        if (typeof deliveryId !== "string" || !isSessionInfo(from) || !isMessage(message)) {
           throw new Error("Invalid message event");
         }
 
         this.emit("message", from, message, deliveryId);
-        if (typeof deliveryId === "string") {
-          const socket = this.socket;
-          if (socket && !socket.destroyed && !socket.writableEnded && socket.writable) {
-            writeMessage(socket, { type: "message_received", deliveryId });
-          }
-        }
         break;
       }
 
@@ -348,50 +390,61 @@ export class IntercomClient extends EventEmitter {
         if (typeof deliveryId !== "string" || typeof messageId !== "string") {
           throw new Error("Invalid delivery_accepted message");
         }
+
+        const pending = this.pendingSends.get(messageId);
+        if (!pending) {
+          return;
+        }
+        pending.accepted = true;
+        pending.deliveryId = deliveryId;
+        this.emit("delivery_accepted", messageId, deliveryId);
         break;
       }
 
       case "delivered": {
         const { deliveryId, messageId } = brokerMessage;
-        if (typeof messageId !== "string" || (deliveryId !== undefined && typeof deliveryId !== "string")) {
+        if (typeof deliveryId !== "string" || typeof messageId !== "string") {
           throw new Error("Invalid delivered message");
         }
 
+        this.outbox?.remove(messageId);
         const pending = this.pendingSends.get(messageId);
         if (!pending) {
-          // Late send responses are harmless once the caller has already timed out.
+          this.emit("outbox_delivered", messageId, deliveryId);
           return;
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, accepted: true, delivered: true, ...(deliveryId ? { deliveryId } : {}) });
+        pending.resolve({ id: messageId, accepted: true, delivered: true, deliveryId });
         break;
       }
 
       case "delivery_failed": {
         const { accepted, code, messageId, reason } = brokerMessage;
         if (
-          typeof messageId !== "string"
+          typeof accepted !== "boolean"
+          || typeof code !== "string"
+          || typeof messageId !== "string"
           || typeof reason !== "string"
-          || (accepted !== undefined && typeof accepted !== "boolean")
-          || (code !== undefined && typeof code !== "string")
         ) {
           throw new Error("Invalid delivery_failed message");
         }
 
+        this.outbox?.remove(messageId);
         const pending = this.pendingSends.get(messageId);
         if (!pending) {
-          // Late send responses are harmless once the caller has already timed out.
+          this.emit("outbox_failed", messageId, code, reason);
           return;
         }
 
         this.pendingSends.delete(messageId);
         pending.resolve({
           id: messageId,
-          ...(accepted !== undefined ? { accepted } : {}),
+          accepted,
           delivered: false,
-          ...(code ? { code } : {}),
+          code: code as DeliveryFailureCode,
           reason,
+          ...(pending.deliveryId ? { deliveryId: pending.deliveryId } : {}),
         });
         break;
       }
@@ -410,16 +463,25 @@ export class IntercomClient extends EventEmitter {
         if (typeof fromSessionId !== "string" || typeof messageId !== "string" || typeof reason !== "string") {
           throw new Error("Invalid ask_cancelled message");
         }
-        this.emit("ask_cancelled", messageId, fromSessionId, reason);
+        this.emit("ask_cancelled", messageId, fromSessionId, reason as AskCancellationReason);
         break;
       }
 
       case "ask_control_result": {
         const { action, applied, messageId, requestId } = brokerMessage;
-        if (action !== "cancel" || typeof applied !== "boolean" || typeof messageId !== "string" || typeof requestId !== "string") {
+        if (
+          (action !== "defer" && action !== "cancel")
+          || typeof applied !== "boolean"
+          || typeof messageId !== "string"
+          || typeof requestId !== "string"
+        ) {
           throw new Error("Invalid ask_control_result message");
         }
-        this.emit("ask_control_result", requestId, messageId, applied);
+        const pending = this.pendingAskControls.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingAskControls.delete(requestId);
+        pending.resolve(applied);
         break;
       }
 
@@ -451,16 +513,17 @@ export class IntercomClient extends EventEmitter {
       }
 
       case "error": {
-        if (typeof brokerMessage.error !== "string") {
+        if (typeof brokerMessage.code !== "string" || typeof brokerMessage.error !== "string") {
           throw new Error("Invalid error message");
         }
 
-        const error = new Error(brokerMessage.error) as Error & { code?: string };
-        if (typeof brokerMessage.code === "string") error.code = brokerMessage.code;
         if (this._sessionId === null) {
-          this.emit("_registration_error", error);
-          break;
+          const error = new Error(brokerMessage.error) as Error & { code?: string };
+          error.code = brokerMessage.code;
+          throw error;
         }
+        const error = new Error(brokerMessage.error) as Error & { code?: string };
+        error.code = brokerMessage.code;
         this.emit("error", error);
         break;
       }
@@ -470,7 +533,7 @@ export class IntercomClient extends EventEmitter {
     }
   }
 
-  async disconnect(): Promise<void> {
+  async disconnect(preserveAsks = false): Promise<void> {
     const socket = this.socket;
     if (!socket) {
       return;
@@ -479,6 +542,7 @@ export class IntercomClient extends EventEmitter {
     this.disconnecting = true;
     this.disconnectError = null;
     this.failPending(new Error("Client disconnected"));
+    if (!preserveAsks) this.outbox?.clear();
 
     await new Promise<void>((resolve) => {
       let settled = false;
@@ -504,7 +568,7 @@ export class IntercomClient extends EventEmitter {
       socket.once("error", onError);
 
       try {
-        writeMessage(socket, { type: "unregister" });
+        writeMessage(socket, { type: "unregister", ...(preserveAsks ? { preserveAsks: true } : {}) });
         socket.end();
       } catch {
         // Disconnect should still finish even if the unregister write fails.
@@ -520,7 +584,7 @@ export class IntercomClient extends EventEmitter {
     } catch (error) {
       return Promise.reject(toError(error));
     }
-
+    
     return new Promise((resolve, reject) => {
       const requestId = randomUUID();
       const wrappedResolve = (sessions: SessionInfo[]) => {
@@ -555,8 +619,17 @@ export class IntercomClient extends EventEmitter {
     } catch (error) {
       return Promise.reject(toError(error));
     }
-
+    
     const messageId = options.messageId ?? randomUUID();
+    if (this.pendingSends.has(messageId)) {
+      return Promise.resolve({
+        id: messageId,
+        accepted: false,
+        delivered: false,
+        code: "DUPLICATE_MESSAGE_ID",
+        reason: `Message ID ${messageId} is already pending`,
+      });
+    }
     const message: Message = {
       id: messageId,
       timestamp: Date.now(),
@@ -567,6 +640,12 @@ export class IntercomClient extends EventEmitter {
         attachments: options.attachments,
       },
     };
+
+    try {
+      this.outbox?.enqueue(to, message);
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
 
     return new Promise((resolve, reject) => {
       const wrappedResolve = (result: SendResult) => {
@@ -583,7 +662,11 @@ export class IntercomClient extends EventEmitter {
           wrappedReject(new Error("Send timeout"));
         }
       }, 10000);
-      this.pendingSends.set(messageId, { resolve: wrappedResolve, reject: wrappedReject });
+      this.pendingSends.set(messageId, {
+        accepted: false,
+        resolve: wrappedResolve,
+        reject: wrappedReject,
+      });
 
       try {
         writeMessage(socket, { type: "send", to, message });
@@ -595,20 +678,68 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
-  cancelAsk(messageId: string): void {
+  acknowledgeMessage(deliveryId: string): boolean {
+    return this.writeControlMessage({ type: "message_received", deliveryId });
+  }
+
+  rejectMessage(deliveryId: string, reason: string): boolean {
+    return this.writeControlMessage({ type: "message_rejected", deliveryId, code: "CONFLICTING_MESSAGE_ID", reason });
+  }
+
+  deferAsk(messageId: string): Promise<boolean> {
+    return this.sendAskControl("defer", messageId);
+  }
+
+  cancelAsk(messageId: string): Promise<boolean> {
+    return this.sendAskControl("cancel", messageId);
+  }
+
+  private sendAskControl(action: "defer" | "cancel", messageId: string): Promise<boolean> {
+    const requestId = randomUUID();
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.pendingAskControls.delete(requestId);
+        resolve(false);
+      }, 2000);
+      timeout.unref?.();
+      this.pendingAskControls.set(requestId, { resolve, timeout });
+      if (!this.writeControlMessage({ type: action === "defer" ? "defer_ask" : "cancel_ask", requestId, messageId })) {
+        clearTimeout(timeout);
+        this.pendingAskControls.delete(requestId);
+        resolve(false);
+      }
+    });
+  }
+
+  private writeControlMessage(message: Record<string, unknown>): boolean {
     if (this.disconnecting) {
-      return;
+      return false;
     }
 
     const socket = this.socket;
     if (!socket || !this._sessionId || socket.destroyed || socket.writableEnded || !socket.writable) {
-      return;
+      return false;
     }
 
     try {
-      writeMessage(socket, { type: "cancel_ask", requestId: randomUUID(), messageId });
+      writeMessage(socket, message);
+      return true;
     } catch {
-      // Cancellation is best-effort; local waiter cleanup must still proceed.
+      // Control messages are best-effort; local cleanup must still proceed.
+      return false;
+    }
+  }
+
+  private replayOutbox(): void {
+    const socket = this.socket;
+    if (!socket || !this._sessionId || socket.destroyed || socket.writableEnded || !socket.writable) return;
+    for (const entry of this.outbox?.list() ?? []) {
+      if (this.pendingSends.has(entry.message.id)) continue;
+      try {
+        writeMessage(socket, { type: "send", to: entry.to, message: entry.message });
+      } catch {
+        return;
+      }
     }
   }
 
