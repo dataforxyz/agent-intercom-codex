@@ -2244,7 +2244,7 @@ var VirtualCodexAgent = class {
       sandbox,
       serviceName: "codex-intercom",
       developerInstructions: this.agent.instructions ?? null,
-      threadSource: "integration"
+      threadSource: "cli"
     });
     this.threadId = getThreadId(result);
     this.state.agents[this.agent.id] = { threadId: this.threadId, updatedAt: Date.now() };
@@ -3064,6 +3064,9 @@ function resolveCoiResumeRequest(args) {
   if (promptArgs[0] !== "resume" || !promptArgs[1]) return { optionArgs, promptArgs };
   return { optionArgs, threadId: promptArgs[1], promptArgs: promptArgs.slice(2) };
 }
+function buildCoiTuiArgs(remote, optionArgs, threadId, promptArgs, explicitResume) {
+  return explicitResume ? ["resume", "--remote", remote, ...optionArgs, threadId, ...promptArgs] : ["--remote", remote, ...optionArgs, ...promptArgs];
+}
 function buildCodexAppServerArgs(args, socketPath) {
   const { optionArgs } = splitCodexResumeArgs(args);
   const appServerArgs = [];
@@ -3288,7 +3291,13 @@ async function runCoi(options) {
   const { optionArgs, promptArgs } = resumeRequest;
   process.stderr.write(`coi sidecar thread: ${threadId}
 `);
-  const resolvedTuiArgs = ["resume", "--remote", remote, ...optionArgs, threadId, ...promptArgs];
+  const resolvedTuiArgs = buildCoiTuiArgs(
+    remote,
+    optionArgs,
+    threadId,
+    promptArgs,
+    Boolean(resumeRequest.threadId)
+  );
   let copying = false;
   const copyCurrentContact = (controls) => {
     if (copying) return;
@@ -3341,6 +3350,7 @@ if (process.argv[1] && (basename2(process.argv[1]) === "coi.ts" || basename2(pro
 }
 export {
   buildCodexAppServerArgs,
+  buildCoiTuiArgs,
   cleanupOldCoiStateFiles,
   createDefaultIdentity,
   deriveBridgeAgentRuntimeConfig,

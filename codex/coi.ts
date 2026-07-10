@@ -303,6 +303,18 @@ export function resolveCoiResumeRequest(args: string[]): {
   return { optionArgs, threadId: promptArgs[1], promptArgs: promptArgs.slice(2) };
 }
 
+export function buildCoiTuiArgs(
+  remote: string,
+  optionArgs: string[],
+  threadId: string,
+  promptArgs: string[],
+  explicitResume: boolean,
+): string[] {
+  return explicitResume
+    ? ["resume", "--remote", remote, ...optionArgs, threadId, ...promptArgs]
+    : ["--remote", remote, ...optionArgs, ...promptArgs];
+}
+
 export function buildCodexAppServerArgs(args: string[], socketPath: string): string[] {
   const { optionArgs } = splitCodexResumeArgs(args);
   const appServerArgs: string[] = [];
@@ -556,7 +568,13 @@ export async function runCoi(options: CoiOptions): Promise<number> {
   const threadId = await daemon.ensureThreadForAgent(id);
   const { optionArgs, promptArgs } = resumeRequest;
   process.stderr.write(`coi sidecar thread: ${threadId}\n`);
-  const resolvedTuiArgs = ["resume", "--remote", remote, ...optionArgs, threadId, ...promptArgs];
+  const resolvedTuiArgs = buildCoiTuiArgs(
+    remote,
+    optionArgs,
+    threadId,
+    promptArgs,
+    Boolean(resumeRequest.threadId),
+  );
   let copying = false;
   const copyCurrentContact = (controls: { insertText(text: string): void }) => {
     if (copying) return;

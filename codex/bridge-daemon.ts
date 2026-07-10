@@ -346,7 +346,7 @@ export class VirtualCodexAgent {
       sandbox,
       serviceName: "codex-intercom",
       developerInstructions: this.agent.instructions ?? null,
-      threadSource: "integration",
+      threadSource: "cli",
     });
     this.threadId = getThreadId(result);
     this.state.agents[this.agent.id] = { threadId: this.threadId, updatedAt: Date.now() };

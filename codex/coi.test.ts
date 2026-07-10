@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildCodexAppServerArgs, cleanupOldCoiStateFiles, createDefaultIdentity, deriveBridgeAgentRuntimeConfig, hasCodexHelpOrVersion, parseCoiArgs, resolveCoiResumeRequest, sanitizeSegment, splitCodexResumeArgs } from "./coi.ts";
+import { buildCodexAppServerArgs, buildCoiTuiArgs, cleanupOldCoiStateFiles, createDefaultIdentity, deriveBridgeAgentRuntimeConfig, hasCodexHelpOrVersion, parseCoiArgs, resolveCoiResumeRequest, sanitizeSegment, splitCodexResumeArgs } from "./coi.ts";
 import { filterAltIInput, TuiInputDecoder } from "./tui-input.ts";
 
 test("sanitizeSegment keeps readable safe ids", () => {
@@ -75,6 +75,15 @@ test("resolveCoiResumeRequest reuses an explicitly requested Codex thread", () =
     threadId: "thread-123",
     promptArgs: ["continue this"],
   });
+});
+
+test("buildCoiTuiArgs opens a fresh remote TUI without resuming an empty sidecar thread", () => {
+  assert.deepEqual(buildCoiTuiArgs("unix:///tmp/coi.sock", ["--profile", "work"], "thread-sidecar", [], false), [
+    "--remote", "unix:///tmp/coi.sock", "--profile", "work",
+  ]);
+  assert.deepEqual(buildCoiTuiArgs("unix:///tmp/coi.sock", [], "thread-requested", ["continue"], true), [
+    "resume", "--remote", "unix:///tmp/coi.sock", "thread-requested", "continue",
+  ]);
 });
 
 test("buildCodexAppServerArgs forwards only app-server-compatible config options", () => {
