@@ -7,6 +7,8 @@ import {
   ensureIntercomRuntimeDir,
   getBrokerSocketPath,
   getIntercomDirPath,
+  INTERCOM_PROTOCOL_NAME,
+  INTERCOM_PROTOCOL_VERSION,
   INTERCOM_RUNTIME_FILE_MODE,
   restrictIntercomRuntimeFile,
 } from "./paths.ts";
@@ -182,6 +184,14 @@ class IntercomBroker {
     }, 5000);
   }
 
+  private sendError(socket: net.Socket, code: string, error: string): void {
+    writeMessage(socket, { type: "error", code, error });
+  }
+
+  private sendDeliveryFailure(socket: net.Socket, messageId: string, code: string, reason: string): void {
+    writeMessage(socket, { type: "delivery_failed", messageId, accepted: false, code, reason });
+  }
+
   private handleMessage(
     socket: net.Socket,
     msg: unknown,
@@ -208,6 +218,15 @@ class IntercomBroker {
           throw new Error("Received duplicate register message");
         }
 
+        if (
+          (clientMessage.protocol !== undefined || clientMessage.version !== undefined)
+          && (clientMessage.protocol !== INTERCOM_PROTOCOL_NAME || clientMessage.version !== INTERCOM_PROTOCOL_VERSION)
+        ) {
+          this.sendError(socket, "PROTOCOL_MISMATCH", `Unsupported intercom protocol; expected ${INTERCOM_PROTOCOL_NAME} v${INTERCOM_PROTOCOL_VERSION}`);
+          socket.end();
+          break;
+        }
+
         let id: string = randomUUID();
         if (clientMessage.sessionId !== undefined) {
           if (!isSessionId(clientMessage.sessionId)) {
@@ -229,7 +248,12 @@ class IntercomBroker {
           this.shutdownTimer = null;
         }
 
-        writeMessage(socket, { type: "registered", sessionId: id });
+        writeMessage(socket, {
+          type: "registered",
+          sessionId: id,
+          protocol: INTERCOM_PROTOCOL_NAME,
+          version: INTERCOM_PROTOCOL_VERSION,
+        });
         this.broadcast({ type: "session_joined", session: info }, id);
         break;
       }
@@ -267,11 +291,7 @@ class IntercomBroker {
         const messageId = isMessage(message) ? message.id : "unknown";
 
         if (typeof clientMessage.to !== "string" || !isMessage(message)) {
-          writeMessage(socket, {
-            type: "delivery_failed",
-            messageId,
-            reason: "Invalid message format",
-          });
+          this.sendDeliveryFailure(socket, messageId, "INVALID_MESSAGE", "Invalid message format");
           break;
         }
 
@@ -282,60 +302,49 @@ class IntercomBroker {
         if (targets.length === 1) {
           const fromSession = this.sessions.get(currentId);
           if (!fromSession || fromSession.socket !== socket) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "Sender session not found",
-            });
+            this.sendDeliveryFailure(socket, message.id, "SENDER_NOT_FOUND", "Sender session not found");
             break;
           }
           const target = targets[0];
           if (replyEdge && (replyEdge.to !== currentId || replyEdge.from !== target.info.id)) {
-            writeMessage(socket, {
-              type: "delivery_failed",
-              messageId: message.id,
-              reason: "Reply target does not match the pending ask",
-            });
+            this.sendDeliveryFailure(socket, message.id, "INVALID_REPLY_TARGET", "Reply target does not match the pending ask");
             break;
           }
           if (message.expectsReply) {
             const reverseEdge = Array.from(this.askEdges.entries()).find(([edgeMessageId, edge]) => edgeMessageId !== message.replyTo && edge.from === target.info.id && edge.to === currentId);
             if (reverseEdge) {
-              writeMessage(socket, {
-                type: "delivery_failed",
-                messageId: message.id,
-                reason: "Mutual ask refused: target session is already waiting for a reply from this session.",
-              });
+              this.sendDeliveryFailure(socket, message.id, "MUTUAL_ASK", "Mutual ask refused: target session is already waiting for a reply from this session.");
               break;
             }
             this.askEdges.set(message.id, { from: currentId, to: target.info.id, createdAt: Date.now() });
           }
+          const deliveryId = randomUUID();
           writeMessage(target.socket, {
             type: "message",
+            deliveryId,
             from: fromSession.info,
             message,
           });
           if (message.replyTo) {
             this.askEdges.delete(message.replyTo);
           }
-          writeMessage(socket, { type: "delivered", messageId: message.id });
+          writeMessage(socket, { type: "delivered", messageId: message.id, deliveryId });
           break;
         }
 
         if (targets.length > 1) {
-          writeMessage(socket, {
-            type: "delivery_failed",
-            messageId: message.id,
-            reason: `Multiple sessions named \"${clientMessage.to}\" are connected. Use the session ID instead.`,
-          });
+          this.sendDeliveryFailure(socket, message.id, "AMBIGUOUS_TARGET", `Multiple sessions named \"${clientMessage.to}\" are connected. Use the session ID instead.`);
           break;
         }
 
-        writeMessage(socket, {
-          type: "delivery_failed",
-          messageId: message.id,
-          reason: "Session not found",
-        });
+        this.sendDeliveryFailure(socket, message.id, "SESSION_NOT_FOUND", "Session not found");
+        break;
+      }
+
+      case "message_received": {
+        if (!currentId || typeof clientMessage.deliveryId !== "string") {
+          throw new Error("Invalid message_received message");
+        }
         break;
       }
 
@@ -348,8 +357,18 @@ class IntercomBroker {
         }
         const session = this.sessions.get(currentId);
         const edge = this.askEdges.get(clientMessage.messageId);
-        if (session?.socket === socket && edge?.from === currentId) {
+        const applied = Boolean(session?.socket === socket && edge?.from === currentId);
+        if (applied) {
           this.askEdges.delete(clientMessage.messageId);
+        }
+        if (typeof clientMessage.requestId === "string") {
+          writeMessage(socket, {
+            type: "ask_control_result",
+            requestId: clientMessage.requestId,
+            action: "cancel",
+            messageId: clientMessage.messageId,
+            applied,
+          });
         }
         break;
       }

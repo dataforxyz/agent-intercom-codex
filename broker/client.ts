@@ -2,7 +2,7 @@ import { EventEmitter } from "events";
 import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
-import { getBrokerSocketPath } from "./paths.ts";
+import { getBrokerSocketPath, INTERCOM_PROTOCOL_NAME, INTERCOM_PROTOCOL_VERSION } from "./paths.ts";
 import type { SessionInfo, Message, Attachment } from "../types.ts";
 
 const BROKER_SOCKET = getBrokerSocketPath();
@@ -17,7 +17,10 @@ interface SendOptions {
 
 interface SendResult {
   id: string;
+  accepted?: boolean;
   delivered: boolean;
+  deliveryId?: string;
+  code?: string;
   reason?: string;
 }
 
@@ -191,6 +194,8 @@ export class IntercomClient extends EventEmitter {
         reject(err);
       };
 
+      const onRegistrationError = (err: Error) => onError(err);
+
       const onClose = () => {
         const wasConnecting = !settled && !this._sessionId;
         const wasDisconnecting = this.disconnecting;
@@ -236,6 +241,7 @@ export class IntercomClient extends EventEmitter {
 
       const cleanupConnectionAttempt = () => {
         this.off("_registered", onRegistered);
+        this.off("_registration_error", onRegistrationError);
         socket.off("error", onError);
         clearTimeout(timeout);
       };
@@ -252,9 +258,16 @@ export class IntercomClient extends EventEmitter {
 
       socket.on("error", onSocketError);
       this.once("_registered", onRegistered);
+      this.once("_registration_error", onRegistrationError);
 
       try {
-        writeMessage(socket, { type: "register", session, ...(sessionId ? { sessionId } : {}) });
+        writeMessage(socket, {
+          type: "register",
+          protocol: INTERCOM_PROTOCOL_NAME,
+          version: INTERCOM_PROTOCOL_VERSION,
+          session,
+          ...(sessionId ? { sessionId } : {}),
+        });
       } catch (error) {
         cleanupConnectionAttempt();
         cleanupSocketListeners();
@@ -274,13 +287,17 @@ export class IntercomClient extends EventEmitter {
 
     const brokerMessage = msg as { type: string } & Record<string, unknown>;
 
-    if (this._sessionId === null && brokerMessage.type !== "registered") {
+    if (this._sessionId === null && brokerMessage.type !== "registered" && brokerMessage.type !== "error") {
       throw new Error(`Received ${brokerMessage.type} before registered`);
     }
 
     switch (brokerMessage.type) {
       case "registered": {
-        if (typeof brokerMessage.sessionId !== "string") {
+        if (
+          typeof brokerMessage.sessionId !== "string"
+          || (brokerMessage.protocol !== undefined && brokerMessage.protocol !== INTERCOM_PROTOCOL_NAME)
+          || (brokerMessage.version !== undefined && brokerMessage.version !== INTERCOM_PROTOCOL_VERSION)
+        ) {
           throw new Error("Invalid registered message");
         }
 
@@ -311,18 +328,32 @@ export class IntercomClient extends EventEmitter {
       }
 
       case "message": {
-        const { from, message } = brokerMessage;
-        if (!isSessionInfo(from) || !isMessage(message)) {
+        const { deliveryId, from, message } = brokerMessage;
+        if ((deliveryId !== undefined && typeof deliveryId !== "string") || !isSessionInfo(from) || !isMessage(message)) {
           throw new Error("Invalid message event");
         }
 
-        this.emit("message", from, message);
+        this.emit("message", from, message, deliveryId);
+        if (typeof deliveryId === "string") {
+          const socket = this.socket;
+          if (socket && !socket.destroyed && !socket.writableEnded && socket.writable) {
+            writeMessage(socket, { type: "message_received", deliveryId });
+          }
+        }
+        break;
+      }
+
+      case "delivery_accepted": {
+        const { deliveryId, messageId } = brokerMessage;
+        if (typeof deliveryId !== "string" || typeof messageId !== "string") {
+          throw new Error("Invalid delivery_accepted message");
+        }
         break;
       }
 
       case "delivered": {
-        const { messageId } = brokerMessage;
-        if (typeof messageId !== "string") {
+        const { deliveryId, messageId } = brokerMessage;
+        if (typeof messageId !== "string" || (deliveryId !== undefined && typeof deliveryId !== "string")) {
           throw new Error("Invalid delivered message");
         }
 
@@ -333,13 +364,18 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: true });
+        pending.resolve({ id: messageId, accepted: true, delivered: true, ...(deliveryId ? { deliveryId } : {}) });
         break;
       }
 
       case "delivery_failed": {
-        const { messageId, reason } = brokerMessage;
-        if (typeof messageId !== "string" || typeof reason !== "string") {
+        const { accepted, code, messageId, reason } = brokerMessage;
+        if (
+          typeof messageId !== "string"
+          || typeof reason !== "string"
+          || (accepted !== undefined && typeof accepted !== "boolean")
+          || (code !== undefined && typeof code !== "string")
+        ) {
           throw new Error("Invalid delivery_failed message");
         }
 
@@ -350,7 +386,40 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: false, reason });
+        pending.resolve({
+          id: messageId,
+          ...(accepted !== undefined ? { accepted } : {}),
+          delivered: false,
+          ...(code ? { code } : {}),
+          reason,
+        });
+        break;
+      }
+
+      case "ask_deferred": {
+        const { fromSessionId, messageId } = brokerMessage;
+        if (typeof fromSessionId !== "string" || typeof messageId !== "string") {
+          throw new Error("Invalid ask_deferred message");
+        }
+        this.emit("ask_deferred", messageId, fromSessionId);
+        break;
+      }
+
+      case "ask_cancelled": {
+        const { fromSessionId, messageId, reason } = brokerMessage;
+        if (typeof fromSessionId !== "string" || typeof messageId !== "string" || typeof reason !== "string") {
+          throw new Error("Invalid ask_cancelled message");
+        }
+        this.emit("ask_cancelled", messageId, fromSessionId, reason);
+        break;
+      }
+
+      case "ask_control_result": {
+        const { action, applied, messageId, requestId } = brokerMessage;
+        if (action !== "cancel" || typeof applied !== "boolean" || typeof messageId !== "string" || typeof requestId !== "string") {
+          throw new Error("Invalid ask_control_result message");
+        }
+        this.emit("ask_control_result", requestId, messageId, applied);
         break;
       }
 
@@ -386,7 +455,13 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid error message");
         }
 
-        this.emit("error", new Error(brokerMessage.error));
+        const error = new Error(brokerMessage.error) as Error & { code?: string };
+        if (typeof brokerMessage.code === "string") error.code = brokerMessage.code;
+        if (this._sessionId === null) {
+          this.emit("_registration_error", error);
+          break;
+        }
+        this.emit("error", error);
         break;
       }
 
@@ -531,7 +606,7 @@ export class IntercomClient extends EventEmitter {
     }
 
     try {
-      writeMessage(socket, { type: "cancel_ask", messageId });
+      writeMessage(socket, { type: "cancel_ask", requestId: randomUUID(), messageId });
     } catch {
       // Cancellation is best-effort; local waiter cleanup must still proceed.
     }

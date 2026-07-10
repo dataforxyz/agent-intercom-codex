@@ -4,6 +4,8 @@ import { homedir } from "os";
 
 export const INTERCOM_DIR_MODE = 0o700;
 export const INTERCOM_RUNTIME_FILE_MODE = 0o600;
+export const INTERCOM_PROTOCOL_NAME = "pi-intercom";
+export const INTERCOM_PROTOCOL_VERSION = 2;
 
 function sanitizePipeSegment(value: string): string {
   return value
