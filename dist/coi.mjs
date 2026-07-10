@@ -2128,17 +2128,19 @@ function appServerToolResponse(result) {
   };
 }
 var VirtualCodexAgent = class {
-  constructor(agent, app, state, statePath) {
+  constructor(agent, app, state, statePath, hooks = {}) {
     this.agent = agent;
     this.app = app;
     this.state = state;
     this.statePath = statePath;
+    this.hooks = hooks;
     this.threadId = agent.threadId ?? state.agents[agent.id]?.threadId ?? null;
   }
   agent;
   app;
   state;
   statePath;
+  hooks;
   client = new IntercomClient();
   threadId;
   activeTurnId = null;
@@ -2150,6 +2152,7 @@ var VirtualCodexAgent = class {
   turnCompletionWaiters = /* @__PURE__ */ new Map();
   toolMessageCountsByTurn = /* @__PURE__ */ new Map();
   toolMessageTimestamps = [];
+  externalTurns = /* @__PURE__ */ new Map();
   async start() {
     this.client.on("message", (from, message, deliveryId) => {
       const routed = this.routeMessage(from, message);
@@ -2276,6 +2279,7 @@ var VirtualCodexAgent = class {
     const input = [textInput(formatMessage(from, message, this.agent))];
     const result = await this.startTurn(threadId, input);
     const turnId = getTurnId(result);
+    this.externalTurns.set(turnId, { from, message });
     const completed = this.waitForTurnCompletion(turnId);
     if (message.expectsReply) {
       const waiters = this.waiters.get(turnId) ?? [];
@@ -2346,7 +2350,18 @@ var VirtualCodexAgent = class {
   async finishTurn(turnId) {
     try {
       await this.replyToWaiters(turnId);
+      const external = this.externalTurns.get(turnId);
+      if (external && this.threadId) {
+        this.hooks.onExternalTurnComplete?.({
+          agentId: this.agent.id,
+          threadId: this.threadId,
+          from: external.from,
+          message: external.message,
+          response: this.finalMessages.get(turnId)?.trim() || "Codex turn completed without a final message."
+        });
+      }
     } finally {
+      this.externalTurns.delete(turnId);
       this.finalMessages.delete(turnId);
       this.waiters.delete(turnId);
       this.toolMessageCountsByTurn.delete(turnId);
@@ -2487,12 +2502,14 @@ ${reply.content.text}${formatAttachments(reply.content.attachments)}`, { ok: tru
   }
 };
 var CodexBridgeDaemon = class {
-  constructor(config) {
+  constructor(config, hooks = {}) {
     this.config = config;
+    this.hooks = hooks;
     this.app = new CodexAppServerClient(config.appServer);
     this.app.setServerRequestHandler((message) => this.handleServerRequest(message));
   }
   config;
+  hooks;
   app;
   agents = [];
   inflightToolCalls = /* @__PURE__ */ new Map();
@@ -2510,7 +2527,7 @@ var CodexBridgeDaemon = class {
       }
       for (const agent of this.agents) agent.onNotification(message);
     });
-    this.agents = this.config.agents.map((agent) => new VirtualCodexAgent(agent, this.app, state, this.config.statePath));
+    this.agents = this.config.agents.map((agent) => new VirtualCodexAgent(agent, this.app, state, this.config.statePath, this.hooks));
     for (const agent of this.agents) await agent.start();
     process.stderr.write(`codex-intercom bridge running ${this.agents.length} virtual agent(s)
 `);
@@ -3119,7 +3136,7 @@ function terminalNotification(message) {
   else process.stderr.write(`${safe}
 `);
 }
-async function runInteractiveTui(command, args, cwd, onAltI, onAltM) {
+async function runInteractiveTui(command, args, refreshArgs, cwd, onAltI, onAltM, installRefresh) {
   const runInherited = async () => {
     const tui2 = spawn4(command, args, { cwd, env: process.env, stdio: "inherit" });
     const [code, signal] = await once2(tui2, "exit");
@@ -3145,6 +3162,13 @@ async function runInteractiveTui(command, args, cwd, onAltI, onAltM) {
     env: process.env
   });
   const outputSubscription = tui.onData((data) => process.stdout.write(data));
+  let refreshRequested = false;
+  const removeRefresh = installRefresh?.(() => {
+    if (refreshRequested) return;
+    refreshRequested = true;
+    terminalNotification("Intercom turn completed; refreshing Codex TUI");
+    tui.kill();
+  });
   const previousRawMode = Boolean(process.stdin.isRaw);
   const inputDecoder = new TuiInputDecoder();
   let pendingTimer = null;
@@ -3176,11 +3200,13 @@ async function runInteractiveTui(command, args, cwd, onAltI, onAltM) {
   process.stdin.resume();
   process.stdin.on("data", onInput);
   process.stdout.on("resize", onResize);
+  let exitCode;
   try {
-    return await new Promise((resolve5) => {
-      tui.onExit(({ exitCode, signal }) => resolve5(exitCode ?? (signal === 2 ? 130 : 1)));
+    exitCode = await new Promise((resolve5) => {
+      tui.onExit(({ exitCode: exitCode2, signal }) => resolve5(exitCode2 ?? (signal === 2 ? 130 : 1)));
     });
   } finally {
+    removeRefresh?.();
     if (pendingTimer) clearTimeout(pendingTimer);
     flushPending();
     const ended = inputDecoder.end();
@@ -3195,6 +3221,10 @@ async function runInteractiveTui(command, args, cwd, onAltI, onAltM) {
     process.stdin.setRawMode(previousRawMode);
     outputSubscription.dispose();
   }
+  if (refreshRequested) {
+    return runInteractiveTui(command, refreshArgs, refreshArgs, cwd, onAltI, onAltM, installRefresh);
+  }
+  return exitCode;
 }
 function cleanupOldCoiStateFiles(intercomDir, now = Date.now(), maxAgeMs = COI_STATE_MAX_AGE_MS) {
   let entries;
@@ -3277,7 +3307,13 @@ async function runCoi(options) {
       ...deriveBridgeAgentRuntimeConfig(options.codexArgs, options.cwd)
     }]
   };
-  daemon = new CodexBridgeDaemon(config);
+  let refreshVisibleTui;
+  daemon = new CodexBridgeDaemon(config, {
+    onExternalTurnComplete: ({ from, response }) => {
+      terminalNotification(`Intercom turn from ${from.name || from.id} completed: ${response}`);
+      setTimeout(() => refreshVisibleTui?.(), 1e3).unref();
+    }
+  });
   await daemon.start();
   process.stderr.write(`coi intercom session: ${name} (${id})
 `);
@@ -3298,6 +3334,7 @@ async function runCoi(options) {
     promptArgs,
     Boolean(resumeRequest.threadId)
   );
+  const refreshTuiArgs = ["resume", "--remote", remote, ...optionArgs, threadId];
   let copying = false;
   const copyCurrentContact = (controls) => {
     if (copying) return;
@@ -3328,9 +3365,16 @@ async function runCoi(options) {
     return await runInteractiveTui(
       options.codexCommand,
       resolvedTuiArgs,
+      refreshTuiArgs,
       options.cwd,
       options.copyShortcut ? copyCurrentContact : void 0,
-      options.copyShortcut ? openIntercom : void 0
+      options.copyShortcut ? openIntercom : void 0,
+      (refresh) => {
+        refreshVisibleTui = refresh;
+        return () => {
+          if (refreshVisibleTui === refresh) refreshVisibleTui = void 0;
+        };
+      }
     );
   } finally {
     await cleanupOnce();

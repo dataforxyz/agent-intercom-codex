@@ -2117,17 +2117,19 @@ function appServerToolResponse(result) {
   };
 }
 var VirtualCodexAgent = class {
-  constructor(agent, app, state, statePath) {
+  constructor(agent, app, state, statePath, hooks = {}) {
     this.agent = agent;
     this.app = app;
     this.state = state;
     this.statePath = statePath;
+    this.hooks = hooks;
     this.threadId = agent.threadId ?? state.agents[agent.id]?.threadId ?? null;
   }
   agent;
   app;
   state;
   statePath;
+  hooks;
   client = new IntercomClient();
   threadId;
   activeTurnId = null;
@@ -2139,6 +2141,7 @@ var VirtualCodexAgent = class {
   turnCompletionWaiters = /* @__PURE__ */ new Map();
   toolMessageCountsByTurn = /* @__PURE__ */ new Map();
   toolMessageTimestamps = [];
+  externalTurns = /* @__PURE__ */ new Map();
   async start() {
     this.client.on("message", (from, message, deliveryId) => {
       const routed = this.routeMessage(from, message);
@@ -2265,6 +2268,7 @@ var VirtualCodexAgent = class {
     const input = [textInput(formatMessage(from, message, this.agent))];
     const result = await this.startTurn(threadId, input);
     const turnId = getTurnId(result);
+    this.externalTurns.set(turnId, { from, message });
     const completed = this.waitForTurnCompletion(turnId);
     if (message.expectsReply) {
       const waiters = this.waiters.get(turnId) ?? [];
@@ -2335,7 +2339,18 @@ var VirtualCodexAgent = class {
   async finishTurn(turnId) {
     try {
       await this.replyToWaiters(turnId);
+      const external = this.externalTurns.get(turnId);
+      if (external && this.threadId) {
+        this.hooks.onExternalTurnComplete?.({
+          agentId: this.agent.id,
+          threadId: this.threadId,
+          from: external.from,
+          message: external.message,
+          response: this.finalMessages.get(turnId)?.trim() || "Codex turn completed without a final message."
+        });
+      }
     } finally {
+      this.externalTurns.delete(turnId);
       this.finalMessages.delete(turnId);
       this.waiters.delete(turnId);
       this.toolMessageCountsByTurn.delete(turnId);
@@ -2476,12 +2491,14 @@ ${reply.content.text}${formatAttachments(reply.content.attachments)}`, { ok: tru
   }
 };
 var CodexBridgeDaemon = class {
-  constructor(config) {
+  constructor(config, hooks = {}) {
     this.config = config;
+    this.hooks = hooks;
     this.app = new CodexAppServerClient(config.appServer);
     this.app.setServerRequestHandler((message) => this.handleServerRequest(message));
   }
   config;
+  hooks;
   app;
   agents = [];
   inflightToolCalls = /* @__PURE__ */ new Map();
@@ -2499,7 +2516,7 @@ var CodexBridgeDaemon = class {
       }
       for (const agent of this.agents) agent.onNotification(message);
     });
-    this.agents = this.config.agents.map((agent) => new VirtualCodexAgent(agent, this.app, state, this.config.statePath));
+    this.agents = this.config.agents.map((agent) => new VirtualCodexAgent(agent, this.app, state, this.config.statePath, this.hooks));
     for (const agent of this.agents) await agent.start();
     process.stderr.write(`codex-intercom bridge running ${this.agents.length} virtual agent(s)
 `);

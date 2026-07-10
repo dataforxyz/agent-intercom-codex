@@ -23,6 +23,18 @@ interface ToolReplyWaiter {
   cleanup?: () => void;
 }
 
+export interface ExternalTurnEvent {
+  agentId: string;
+  threadId: string;
+  from: SessionInfo;
+  message: Message;
+  response: string;
+}
+
+export interface CodexBridgeHooks {
+  onExternalTurnComplete?: (event: ExternalTurnEvent) => void;
+}
+
 const APPROVED_INTERCOM_TOOLS = new Set([
   "intercom_whoami",
   "intercom_status",
@@ -233,12 +245,14 @@ export class VirtualCodexAgent {
   private turnCompletionWaiters = new Map<string, Array<() => void>>();
   private toolMessageCountsByTurn = new Map<string, number>();
   private toolMessageTimestamps: number[] = [];
+  private externalTurns = new Map<string, { from: SessionInfo; message: Message }>();
 
   constructor(
     private readonly agent: BridgeAgentConfig,
     private readonly app: CodexAppServerClient,
     private readonly state: BridgeState,
     private readonly statePath: string,
+    private readonly hooks: CodexBridgeHooks = {},
   ) {
     this.threadId = agent.threadId ?? state.agents[agent.id]?.threadId ?? null;
   }
@@ -383,6 +397,7 @@ export class VirtualCodexAgent {
     const input = [textInput(formatMessage(from, message, this.agent))];
     const result = await this.startTurn(threadId, input);
     const turnId = getTurnId(result);
+    this.externalTurns.set(turnId, { from, message });
     const completed = this.waitForTurnCompletion(turnId);
 
     if (message.expectsReply) {
@@ -460,7 +475,18 @@ export class VirtualCodexAgent {
   private async finishTurn(turnId: string): Promise<void> {
     try {
       await this.replyToWaiters(turnId);
+      const external = this.externalTurns.get(turnId);
+      if (external && this.threadId) {
+        this.hooks.onExternalTurnComplete?.({
+          agentId: this.agent.id,
+          threadId: this.threadId,
+          from: external.from,
+          message: external.message,
+          response: this.finalMessages.get(turnId)?.trim() || "Codex turn completed without a final message.",
+        });
+      }
     } finally {
+      this.externalTurns.delete(turnId);
       this.finalMessages.delete(turnId);
       this.waiters.delete(turnId);
       this.toolMessageCountsByTurn.delete(turnId);
@@ -609,7 +635,7 @@ export class CodexBridgeDaemon {
   private agents: VirtualCodexAgent[] = [];
   private inflightToolCalls = new Map<string | number, AbortController>();
 
-  constructor(private readonly config: BridgeConfig) {
+  constructor(private readonly config: BridgeConfig, private readonly hooks: CodexBridgeHooks = {}) {
     this.app = new CodexAppServerClient(config.appServer);
     this.app.setServerRequestHandler((message) => this.handleServerRequest(message));
   }
@@ -628,7 +654,7 @@ export class CodexBridgeDaemon {
       }
       for (const agent of this.agents) agent.onNotification(message);
     });
-    this.agents = this.config.agents.map((agent) => new VirtualCodexAgent(agent, this.app, state, this.config.statePath));
+    this.agents = this.config.agents.map((agent) => new VirtualCodexAgent(agent, this.app, state, this.config.statePath, this.hooks));
     for (const agent of this.agents) await agent.start();
     process.stderr.write(`codex-intercom bridge running ${this.agents.length} virtual agent(s)\n`);
   }

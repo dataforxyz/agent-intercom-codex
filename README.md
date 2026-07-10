@@ -27,7 +27,7 @@ The project has two related pieces:
 
 Use plain MCP when you only need tools inside an already-active Codex turn. Use
 `coi` when you want another session to wake the worker automatically or when
-you want the host-level **Alt+I** contact shortcut. Codex's MCP interface can
+you want the host-level **Alt+I** and **Alt+M** shortcuts. Codex's MCP interface can
 provide intercom tools, but it cannot add custom keybindings to the Codex TUI.
 
 ## Status
@@ -38,6 +38,12 @@ Plain Codex MCP sessions do not receive Pi-style unsolicited visible turns.
 Incoming messages are queued while the MCP server is running; call
 `intercom_pending` to read them. Wake-on-message workflows require `coi` or the
 app-server bridge.
+
+When an external intercom turn completes, `coi` refreshes the attached remote
+TUI by resuming the same thread. The inbound message and final response then
+appear in the already-open terminal instead of existing only in the saved
+transcript. This refresh happens after the turn is idle so Codex does not reopen
+in a phantom `Working` state.
 
 ## Install
 

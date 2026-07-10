@@ -375,9 +375,11 @@ function terminalNotification(message: string): void {
 async function runInteractiveTui(
   command: string,
   args: string[],
+  refreshArgs: string[],
   cwd: string,
   onAltI?: (controls: { insertText(text: string): void }) => void,
   onAltM?: (controls: { insertText(text: string): void }) => void,
+  installRefresh?: (refresh: () => void) => () => void,
 ): Promise<number> {
   const runInherited = async (): Promise<number> => {
     const tui = spawn(command, args, { cwd, env: process.env, stdio: "inherit" });
@@ -406,6 +408,13 @@ async function runInteractiveTui(
     env: process.env,
   });
   const outputSubscription = tui.onData((data) => process.stdout.write(data));
+  let refreshRequested = false;
+  const removeRefresh = installRefresh?.(() => {
+    if (refreshRequested) return;
+    refreshRequested = true;
+    terminalNotification("Intercom turn completed; refreshing Codex TUI");
+    tui.kill();
+  });
   const previousRawMode = Boolean(process.stdin.isRaw);
   const inputDecoder = new TuiInputDecoder();
   let pendingTimer: NodeJS.Timeout | null = null;
@@ -441,11 +450,13 @@ async function runInteractiveTui(
   process.stdin.on("data", onInput);
   process.stdout.on("resize", onResize);
 
+  let exitCode: number;
   try {
-    return await new Promise<number>((resolve) => {
+    exitCode = await new Promise<number>((resolve) => {
       tui.onExit(({ exitCode, signal }) => resolve(exitCode ?? (signal === 2 ? 130 : 1)));
     });
   } finally {
+    removeRefresh?.();
     if (pendingTimer) clearTimeout(pendingTimer);
     flushPending();
     const ended = inputDecoder.end();
@@ -461,6 +472,10 @@ async function runInteractiveTui(
     process.stdin.setRawMode(previousRawMode);
     outputSubscription.dispose();
   }
+  if (refreshRequested) {
+    return runInteractiveTui(command, refreshArgs, refreshArgs, cwd, onAltI, onAltM, installRefresh);
+  }
+  return exitCode;
 }
 
 export function cleanupOldCoiStateFiles(intercomDir: string, now = Date.now(), maxAgeMs = COI_STATE_MAX_AGE_MS): void {
@@ -554,7 +569,13 @@ export async function runCoi(options: CoiOptions): Promise<number> {
       ...deriveBridgeAgentRuntimeConfig(options.codexArgs, options.cwd),
     }],
   };
-  daemon = new CodexBridgeDaemon(config);
+  let refreshVisibleTui: (() => void) | undefined;
+  daemon = new CodexBridgeDaemon(config, {
+    onExternalTurnComplete: ({ from, response }) => {
+      terminalNotification(`Intercom turn from ${from.name || from.id} completed: ${response}`);
+      setTimeout(() => refreshVisibleTui?.(), 1000).unref();
+    },
+  });
   await daemon.start();
   process.stderr.write(`coi intercom session: ${name} (${id})\n`);
 
@@ -575,6 +596,7 @@ export async function runCoi(options: CoiOptions): Promise<number> {
     promptArgs,
     Boolean(resumeRequest.threadId),
   );
+  const refreshTuiArgs = ["resume", "--remote", remote, ...optionArgs, threadId];
   let copying = false;
   const copyCurrentContact = (controls: { insertText(text: string): void }) => {
     if (copying) return;
@@ -612,9 +634,16 @@ export async function runCoi(options: CoiOptions): Promise<number> {
     return await runInteractiveTui(
       options.codexCommand,
       resolvedTuiArgs,
+      refreshTuiArgs,
       options.cwd,
       options.copyShortcut ? copyCurrentContact : undefined,
       options.copyShortcut ? openIntercom : undefined,
+      (refresh) => {
+        refreshVisibleTui = refresh;
+        return () => {
+          if (refreshVisibleTui === refresh) refreshVisibleTui = undefined;
+        };
+      },
     );
   } finally {
     await cleanupOnce();
