@@ -14,6 +14,10 @@
 | Claude Code | [`agent-intercom-claude`](https://github.com/dataforxyz/agent-intercom-claude) |
 | OpenCode | [`agent-intercom-opencode`](https://github.com/dataforxyz/agent-intercom-opencode) |
 
+## Origin and thanks
+
+Agent Intercom grew from [Nico Bailon's original `pi-intercom`](https://github.com/nicobailon/pi-intercom). A sincere thank you to Nico and the original contributors for creating the Pi extension and the foundation this cross-harness family builds on.
+
 This repository contains the Codex adapter. It gives Codex sessions native intercom tools and wakeable workers while remaining fully interoperable with the other Agent Intercom harnesses.
 
 The bundled client and broker use strict intercom protocol v3. A send is only
