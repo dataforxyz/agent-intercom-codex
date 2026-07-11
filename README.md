@@ -5,10 +5,16 @@
   <img src="./assets/logo-generated.png" alt="Codex Intercom generated PNG logo" width="96" height="96">
 </p>
 
-Codex Intercom adds local messaging between Codex, Pi, and other coding-agent
-sessions on the same machine. It speaks the same local broker protocol as
-`pi-intercom`, so sessions can discover each other, send updates, ask blocking
-questions, read pending messages, and reply to asks.
+**Agent Intercom** is a cross-harness, same-machine messaging system for coding agents. Its Pi, Codex, Claude Code, and OpenCode adapters share one local broker and protocol, so sessions can discover and message each other regardless of which harness they run in.
+
+| Harness | Repository |
+|---|---|
+| Pi | [`agent-intercom-pi`](https://github.com/dataforxyz/agent-intercom-pi) |
+| Codex | [`agent-intercom-codex`](https://github.com/dataforxyz/agent-intercom-codex) |
+| Claude Code | [`agent-intercom-claude`](https://github.com/dataforxyz/agent-intercom-claude) |
+| OpenCode | [`agent-intercom-opencode`](https://github.com/dataforxyz/agent-intercom-opencode) |
+
+This repository contains the Codex adapter. It gives Codex sessions native intercom tools and wakeable workers while remaining fully interoperable with the other Agent Intercom harnesses.
 
 The bundled client and broker use strict intercom protocol v3. A send is only
 reported as delivered after the receiving adapter acknowledges it. Unfinished
@@ -32,7 +38,7 @@ provide intercom tools, but it cannot add custom keybindings to the Codex TUI.
 
 ## Status
 
-Preview. This is the Codex-side adapter split out of `pi-intercom`.
+Preview. This is the Codex adapter in the cross-harness Agent Intercom family.
 
 Plain Codex MCP sessions do not receive Pi-style unsolicited visible turns.
 Incoming messages are queued while the MCP server is running; call
@@ -51,7 +57,7 @@ For normal use, install the package so the command-line entry points are on
 `PATH`:
 
 ```bash
-npm install -g github:dataforxyz/codex-intercom
+npm install -g github:dataforxyz/agent-intercom-codex
 ```
 
 This provides:
@@ -98,7 +104,7 @@ intercom tools.
 
 - `intercom_whoami`: show this session's intercom ID, name, cwd, and model.
 - `intercom_status`: show connection status and pending message counts.
-- `intercom_list`: list local Pi and Codex sessions.
+- `intercom_list`: list local Pi, Codex, Claude Code, and OpenCode sessions.
 - `intercom_set_summary`: publish a short discoverable status.
 - `intercom_send`: send a non-blocking message.
 - `intercom_ask`: send a question and wait for the target's reply.
@@ -408,8 +414,8 @@ authority.
 Clone and run from source:
 
 ```bash
-git clone https://github.com/dataforxyz/codex-intercom.git
-cd codex-intercom
+git clone https://github.com/dataforxyz/agent-intercom-codex.git
+cd agent-intercom-codex
 npm install
 npm run build
 npm test
@@ -424,12 +430,13 @@ codex mcp add codex-intercom-dev -- npx --no-install tsx ./codex/server.ts
 Use either the built install or the dev install in a given Codex profile.
 Running both at the same time can register duplicate intercom MCP tools.
 
-## Relationship To Pi Intercom
+## Agent Intercom Compatibility
 
-`pi-intercom` remains the Pi-native extension with overlays, inline rendering,
-and Pi `triggerTurn` delivery. `codex-intercom` is the Codex MCP/plugin adapter
-plus wake-on-message Codex app-server sidecars.
+`agent-intercom-pi` is the Pi-native adapter with overlays, inline rendering,
+and Pi `triggerTurn` delivery. This repository, `agent-intercom-codex`, is the
+Codex MCP/plugin adapter plus wake-on-message Codex app-server sidecars. The
+Claude Code and OpenCode adapters join the same broker and appear in the same
+session list.
 
-For now this repository vendors the minimal local broker/client protocol for
-compatibility. If the protocol stabilizes across multiple adapters, the shared
-parts should move into a small core package.
+All four repositories vendor the compatible local broker/client protocol so any
+adapter can start the broker and communicate across harness boundaries.
