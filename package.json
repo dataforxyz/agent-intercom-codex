@@ -1,6 +1,6 @@
 {
-  "name": "codex-intercom",
-  "version": "0.9.0",
+  "name": "@dataforxyz/agent-intercom-codex",
+  "version": "0.9.1",
   "description": "Codex MCP plugin for direct local messaging with Pi and Codex coding-agent sessions.",
   "license": "AGPL-3.0-or-later",
   "type": "module",
@@ -60,5 +60,8 @@
     "esbuild": "^0.28.1",
     "tsx": "^4.20.0",
     "typescript": "^6.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

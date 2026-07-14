@@ -62,7 +62,7 @@ For normal use, install the package so the command-line entry points are on
 `PATH`:
 
 ```bash
-npm install -g github:dataforxyz/agent-intercom-codex
+npm install -g @dataforxyz/agent-intercom-codex
 ```
 
 This provides:
@@ -94,8 +94,8 @@ stable names or IDs.
 To let a Pi manager create Codex workers with owned systemd cgroups, leases, model/effort selection, logs, and verified cleanup, install the companion Pi packages:
 
 ```bash
-pi install git:github.com/dataforxyz/agent-intercom-pi
-pi install git:github.com/dataforxyz/agent-intercom-orchestrator
+pi install npm:@dataforxyz/agent-intercom-pi
+pi install npm:@dataforxyz/agent-intercom-orchestrator
 ```
 
 Restart Pi or run `/reload`, then call `agent_fleet({ action: "doctor" })`. The orchestrator invokes the installed `coi` command, or a separately configured minimal wrapper such as `coim`; it does not replace this Codex adapter.
