@@ -41,7 +41,7 @@ messages to those workers create or resume app-server threads and start turns.
    to discover your role.
 3. If this is an orchestrator-owned coworker, call `intercom_team` to get the manager and sibling targets without searching globally. Otherwise use `intercom_list`.
 4. Use `intercom_send` for non-blocking updates and handoffs.
-5. Use `intercom_ask` only when you need the answer before continuing.
+5. Use `intercom_ask` only when you need the answer before continuing. Assignments, progress/status checkpoints, notifications, and completion reports use `intercom_send`.
 6. Call `intercom_pending` before ending a coordination turn, then answer
    blocking asks with `intercom_reply`.
 
@@ -82,7 +82,7 @@ intercom_reply({
 })
 ```
 
-Keep at most one unresolved `intercom_ask` to the same recipient. Use `intercom_send` for non-blocking follow-ups.
+Keep at most one unresolved `intercom_ask` to the same recipient. Use `intercom_send` for non-blocking follow-ups and every progress/status request.
 
 Wake a bridge-managed worker:
 

@@ -1,6 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getApprovedIntercomSend, getApprovedIntercomToolFromApproval, getCompletedIntercomSend, isIntercomToolApprovalRequest, threadSandboxMode } from "./bridge-daemon.ts";
+import { EventEmitter } from "node:events";
+import type { IntercomClient } from "../broker/client.ts";
+import { VirtualCodexAgent, getApprovedIntercomSend, getApprovedIntercomToolFromApproval, getCompletedIntercomSend, isIntercomToolApprovalRequest, threadSandboxMode } from "./bridge-daemon.ts";
+
+class FakeIntercomClient extends EventEmitter {
+  connected = false;
+  connectCount = 0;
+  sessionId: string | null = null;
+
+  isConnected(): boolean { return this.connected; }
+  async connect(_registration: unknown, sessionId?: string): Promise<void> {
+    this.connected = true;
+    this.connectCount += 1;
+    this.sessionId = sessionId ?? "fake-session";
+  }
+  async disconnect(): Promise<void> {
+    this.connected = false;
+    this.sessionId = null;
+  }
+  updatePresence(): void {}
+  drop(): void {
+    this.connected = false;
+    this.sessionId = null;
+    this.emit("disconnected", new Error("broker restarted"));
+  }
+}
 
 test("isIntercomToolApprovalRequest accepts exact codex-intercom tools", () => {
   const params = {
@@ -74,6 +99,29 @@ test("getApprovedIntercomSend extracts approved intercom_send tool params", () =
       tool_params: { to: "manager", message: "ACK" },
     },
   }), null);
+});
+
+test("persistent Codex bridge reconnects its stable Intercom identity after broker restart", async () => {
+  const client = new FakeIntercomClient();
+  const agent = new VirtualCodexAgent(
+    { id: "codex-reconnect", name: "codex-reconnect", cwd: process.cwd() } as any,
+    {} as any,
+    { agents: {} },
+    "/tmp/codex-reconnect-state.json",
+    {},
+    {
+      client: client as unknown as IntercomClient,
+      prepareConnection: async () => {},
+      reconnectDelays: [1],
+    },
+  );
+
+  await agent.start();
+  client.drop();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(client.connectCount, 2);
+  assert.equal(client.sessionId, "codex-reconnect");
+  await agent.stop();
 });
 
 test("threadSandboxMode maps bridge sandbox policies to codex thread modes", () => {

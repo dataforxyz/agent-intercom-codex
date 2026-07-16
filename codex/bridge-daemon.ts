@@ -36,6 +36,12 @@ export interface CodexBridgeHooks {
   onExternalTurnComplete?: (event: ExternalTurnEvent) => void;
 }
 
+export interface VirtualCodexAgentOptions {
+  client?: IntercomClient;
+  prepareConnection?: () => Promise<void>;
+  reconnectDelays?: number[];
+}
+
 const APPROVED_INTERCOM_TOOLS = new Set([
   "intercom_whoami",
   "intercom_team",
@@ -236,7 +242,7 @@ function appServerToolResponse(result: ToolResult): unknown {
 }
 
 export class VirtualCodexAgent {
-  private client = new IntercomClient();
+  private client: IntercomClient;
   private threadId: string | null;
   private activeTurnId: string | null = null;
   private waiters = new Map<string, TurnWaiter[]>();
@@ -248,6 +254,13 @@ export class VirtualCodexAgent {
   private toolMessageCountsByTurn = new Map<string, number>();
   private toolMessageTimestamps: number[] = [];
   private externalTurns = new Map<string, { from: SessionInfo; message: Message }>();
+  private connectPromise: Promise<void> | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectAttempt = 0;
+  private reconnectEnabled = true;
+  private readonly intercomStartedAt = Date.now();
+  private readonly prepareConnection: () => Promise<void>;
+  private readonly reconnectDelays: number[];
 
   constructor(
     private readonly agent: BridgeAgentConfig,
@@ -255,11 +268,19 @@ export class VirtualCodexAgent {
     private readonly state: BridgeState,
     private readonly statePath: string,
     private readonly hooks: CodexBridgeHooks = {},
+    options: VirtualCodexAgentOptions = {},
   ) {
     this.threadId = agent.threadId ?? state.agents[agent.id]?.threadId ?? null;
+    this.client = options.client ?? new IntercomClient();
+    this.prepareConnection = options.prepareConnection ?? (async () => {
+      const config = loadConfig();
+      await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
+    });
+    this.reconnectDelays = options.reconnectDelays?.length ? options.reconnectDelays : [250, 500, 1000, 2000, 5000];
   }
 
   async start(): Promise<void> {
+    this.reconnectEnabled = true;
     this.client.on("message", (from: SessionInfo, message: Message, deliveryId: string) => {
       const routed = this.routeMessage(from, message);
       this.client.acknowledgeMessage(deliveryId);
@@ -270,18 +291,81 @@ export class VirtualCodexAgent {
     this.client.on("error", (error) => {
       process.stderr.write(`intercom ${this.agent.id}: ${error.message}\n`);
     });
-    await this.client.connect({
-      name: this.agent.name,
-      cwd: this.agent.cwd,
-      model: this.agent.model ?? "codex-app-server",
-      pid: process.pid,
-      startedAt: Date.now(),
-      lastActivity: Date.now(),
-      status: this.threadId ? "idle" : "idle:no-thread",
-    }, this.agent.id);
+    this.client.on("disconnected", (error: Error) => {
+      this.rejectAllToolReplies(new Error(`Disconnected while waiting for reply: ${error.message}`, { cause: error }));
+      this.scheduleReconnect();
+    });
+    await this.connectIntercom();
+  }
+
+  private async connectIntercom(): Promise<void> {
+    this.clearReconnectTimer();
+    if (this.client.isConnected()) return;
+    if (this.connectPromise) return this.connectPromise;
+    this.connectPromise = (async () => {
+      await this.prepareConnection();
+      await this.client.connect({
+        name: this.agent.name,
+        cwd: this.agent.cwd,
+        model: this.agent.model ?? "codex-app-server",
+        pid: process.pid,
+        startedAt: this.intercomStartedAt,
+        lastActivity: Date.now(),
+        status: this.threadId ? "idle" : "idle:no-thread",
+      }, this.agent.id);
+      this.reconnectAttempt = 0;
+    })();
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (!this.reconnectEnabled || this.reconnectTimer) return;
+    const delay = this.reconnectDelays[Math.min(this.reconnectAttempt, this.reconnectDelays.length - 1)]!;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connectIntercom().then(() => {
+        if (!this.client.isConnected()) {
+          this.reconnectAttempt += 1;
+          this.scheduleReconnect();
+        }
+      }).catch((error) => {
+        this.reconnectAttempt += 1;
+        process.stderr.write(`intercom ${this.agent.id}: reconnect failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        this.scheduleReconnect();
+      });
+    }, delay);
+    this.reconnectTimer.unref?.();
+  }
+
+  private clearReconnectTimer(): void {
+    if (!this.reconnectTimer) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private rejectAllToolReplies(error: Error): void {
+    for (const [replyTo, waiter] of Array.from(this.toolReplyWaiters.entries())) {
+      clearTimeout(waiter.timeout);
+      waiter.cleanup?.();
+      this.toolReplyWaiters.delete(replyTo);
+      waiter.reject(error);
+    }
   }
 
   async stop(): Promise<void> {
+    this.reconnectEnabled = false;
+    this.clearReconnectTimer();
+    if (this.connectPromise) {
+      try {
+        await this.connectPromise;
+      } catch {
+        // A failed in-progress connection is already closed.
+      }
+    }
     await this.client.disconnect();
   }
 

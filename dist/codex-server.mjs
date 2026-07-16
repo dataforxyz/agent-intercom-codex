@@ -1483,22 +1483,45 @@ function textResult(text, structuredContent, isError = false) {
 }
 var CodexIntercomRuntime = class {
   client = null;
+  connectPromise = null;
+  reconnectTimer = null;
+  reconnectAttempt = 0;
+  reconnectEnabled = true;
   identity;
   unread = [];
   unresolvedAsks = /* @__PURE__ */ new Map();
   replyWaiters = /* @__PURE__ */ new Map();
-  constructor(identity = buildCodexRuntimeIdentity()) {
+  clientFactory;
+  prepareConnection;
+  reconnectDelays;
+  constructor(identity = buildCodexRuntimeIdentity(), options = {}) {
     this.identity = identity;
+    this.clientFactory = options.clientFactory ?? (() => new IntercomClient());
+    this.prepareConnection = options.prepareConnection ?? (async () => {
+      const config = loadConfig();
+      if (!config.enabled) throw new Error("Intercom disabled");
+      await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
+    });
+    this.reconnectDelays = options.reconnectDelays?.length ? options.reconnectDelays : [250, 500, 1e3, 2e3, 5e3];
   }
   getIdentity() {
     return this.identity;
   }
   async connect() {
+    this.reconnectEnabled = true;
+    this.clearReconnectTimer();
     if (this.client?.isConnected()) return this.client;
-    const config = loadConfig();
-    if (!config.enabled) throw new Error("Intercom disabled");
-    await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
-    const client = new IntercomClient();
+    if (this.connectPromise) return this.connectPromise;
+    this.connectPromise = this.connectOnce();
+    try {
+      return await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
+  }
+  async connectOnce() {
+    await this.prepareConnection();
+    const client = this.clientFactory();
     client.on("message", (from, message, deliveryId) => {
       this.handleIncomingMessage(from, message);
       client.acknowledgeMessage(deliveryId);
@@ -1511,6 +1534,7 @@ var CodexIntercomRuntime = class {
       }
       this.replyWaiters.clear();
       if (this.client === client) this.client = null;
+      this.scheduleReconnect();
     });
     await client.connect({
       name: this.identity.name,
@@ -1522,12 +1546,43 @@ var CodexIntercomRuntime = class {
       status: "idle"
     }, this.identity.sessionId);
     this.client = client;
+    this.reconnectAttempt = 0;
     return client;
   }
+  scheduleReconnect() {
+    if (!this.reconnectEnabled || this.reconnectTimer) return;
+    const delay = this.reconnectDelays[Math.min(this.reconnectAttempt, this.reconnectDelays.length - 1)];
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connect().then((client) => {
+        if (!client.isConnected()) {
+          this.reconnectAttempt += 1;
+          this.scheduleReconnect();
+        }
+      }).catch(() => {
+        this.reconnectAttempt += 1;
+        this.scheduleReconnect();
+      });
+    }, delay);
+    this.reconnectTimer.unref?.();
+  }
+  clearReconnectTimer() {
+    if (!this.reconnectTimer) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
   async disconnect() {
-    if (!this.client) return;
-    await this.client.disconnect();
+    this.reconnectEnabled = false;
+    this.clearReconnectTimer();
+    if (this.connectPromise) {
+      try {
+        await this.connectPromise;
+      } catch {
+      }
+    }
+    const client = this.client;
     this.client = null;
+    if (client) await client.disconnect();
   }
   handleIncomingMessage(from, message) {
     const waiter = this.replyWaiters.get(message.replyTo ?? "");
@@ -1814,7 +1869,7 @@ function buildToolDefinitions(runtime2) {
     },
     {
       name: "intercom_ask",
-      description: "Ask another intercom session a question and wait for its reply.",
+      description: "Ask another intercom session a question only when the next step depends on its reply. Use intercom_send for assignments, progress/status checkpoints, and notifications.",
       inputSchema: {
         type: "object",
         properties: {
