@@ -638,7 +638,7 @@ import net2 from "net";
 import { randomUUID as randomUUID2 } from "crypto";
 
 // node_modules/@dataforxyz/agent-intercom-core/dist/policy.js
-var POLICY_SEMANTICS_VERSION = 1;
+var POLICY_SEMANTICS_VERSION = 2;
 
 // node_modules/@dataforxyz/agent-intercom-core/dist/policy-vectors.js
 var localRoot = {
@@ -662,7 +662,7 @@ var remoteManager = {
   kind: "remote",
   state: "active",
   generation: 1,
-  policy: "remote-parent",
+  policy: "remote-tree",
   parentSessionId: "local-root",
   rootSessionId: "local-root"
 };
@@ -671,7 +671,7 @@ var remoteChild = {
   kind: "remote",
   state: "active",
   generation: 1,
-  policy: "remote-parent",
+  policy: "remote-tree",
   parentSessionId: "remote-manager",
   rootSessionId: "local-root"
 };
@@ -680,7 +680,7 @@ var remoteSibling = {
   kind: "remote",
   state: "active",
   generation: 1,
-  policy: "remote-parent",
+  policy: "remote-tree",
   parentSessionId: "remote-manager",
   rootSessionId: "local-root"
 };
@@ -713,16 +713,16 @@ var POLICY_VECTORS = [
     expectedReasonOrCode: "direct-parent"
   },
   {
-    name: "remote child cannot skip its direct parent in phase zero",
+    name: "remote child can reach its local root through the ancestor chain",
     principals: [localRoot, remoteManager, remoteChild],
     actorId: "remote-child",
     action: "send",
     targetId: "local-root",
-    expectedAllowed: false,
-    expectedReasonOrCode: "POLICY_DENIED"
+    expectedAllowed: true,
+    expectedReasonOrCode: "ancestor-chain"
   },
   {
-    name: "remote siblings cannot communicate in phase zero",
+    name: "remote siblings cannot communicate in phase one",
     principals: [localRoot, remoteManager, remoteChild, remoteSibling],
     actorId: "remote-child",
     action: "discover",
@@ -749,6 +749,33 @@ var POLICY_VECTORS = [
     expectedReasonOrCode: "POLICY_DENIED"
   },
   {
+    name: "remote manager may inspect its descendant subtree",
+    principals: [localRoot, remoteManager, remoteChild],
+    actorId: "remote-manager",
+    action: "inspect_tree",
+    targetId: "remote-child",
+    expectedAllowed: true,
+    expectedReasonOrCode: "ancestor-control"
+  },
+  {
+    name: "remote child cannot revoke its ancestor",
+    principals: [localRoot, remoteManager, remoteChild],
+    actorId: "remote-child",
+    action: "revoke",
+    targetId: "remote-manager",
+    expectedAllowed: false,
+    expectedReasonOrCode: "POLICY_DENIED"
+  },
+  {
+    name: "remote principal may request attenuated delegation under itself",
+    principals: [localRoot, remoteManager],
+    actorId: "remote-manager",
+    action: "delegate_child",
+    targetId: "remote-manager",
+    expectedAllowed: true,
+    expectedReasonOrCode: "self"
+  },
+  {
     name: "revoked principal cannot communicate",
     principals: [localRoot, { ...remoteManager, state: "revoked" }],
     actorId: "remote-manager",
@@ -768,7 +795,7 @@ var POLICY_VECTORS = [
     expectedReasonOrCode: "STALE_GENERATION"
   }
 ];
-var POLICY_SEMANTICS_HASH = "78178a5fd57c353342642968d3a27262ed02cb236927723675d875959413dce3";
+var POLICY_SEMANTICS_HASH = "f3b00e503631bc91123aedfbcf1df72cc9913e1893c09728b2c598f3dcdfdfe0";
 
 // broker/framing.ts
 var MAX_FRAME_BYTES = 1024 * 1024;
@@ -1057,12 +1084,17 @@ function isSessionInfo(value) {
   if (session.remoteHostId !== void 0 && typeof session.remoteHostId !== "string") return false;
   if (session.parentSessionId !== void 0 && typeof session.parentSessionId !== "string") return false;
   if (session.rootSessionId !== void 0 && typeof session.rootSessionId !== "string") return false;
-  return session.generation === void 0 || typeof session.generation === "number" && Number.isSafeInteger(session.generation);
+  if (session.generation !== void 0 && (typeof session.generation !== "number" || !Number.isSafeInteger(session.generation))) return false;
+  if (session.canDelegate !== void 0 && typeof session.canDelegate !== "boolean") return false;
+  for (const field of ["depth", "maxDepth", "maxChildren"]) {
+    if (session[field] !== void 0 && (typeof session[field] !== "number" || !Number.isSafeInteger(session[field]))) return false;
+  }
+  return true;
 }
 function isRemoteAccessMetadata(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const access = value;
-  return access.origin === "remote" && typeof access.remoteHostId === "string" && typeof access.parentSessionId === "string" && typeof access.rootSessionId === "string" && typeof access.generation === "number" && Number.isSafeInteger(access.generation) && access.generation > 0 && (access.sessionCredential === void 0 || typeof access.sessionCredential === "string");
+  return access.origin === "remote" && typeof access.remoteHostId === "string" && typeof access.parentSessionId === "string" && typeof access.rootSessionId === "string" && typeof access.generation === "number" && Number.isSafeInteger(access.generation) && access.generation > 0 && typeof access.canDelegate === "boolean" && typeof access.depth === "number" && Number.isSafeInteger(access.depth) && typeof access.maxDepth === "number" && Number.isSafeInteger(access.maxDepth) && typeof access.maxChildren === "number" && Number.isSafeInteger(access.maxChildren) && (access.sessionCredential === void 0 || typeof access.sessionCredential === "string");
 }
 var IntercomClient = class extends EventEmitter2 {
   socket = null;
