@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-process.stderr.write("[agent-intercom-build] package=@dataforxyz/agent-intercom-codex version=0.10.0 target=codex-server sourceSha256=1af33a5dbe64d7a2c0abe37939eb618a290553662e81793e5d0b0598fd73af11\n");
+process.stderr.write("[agent-intercom-build] package=@dataforxyz/agent-intercom-codex version=0.10.0 target=codex-server sourceSha256=28cbe04c291ec9ca89e519b437e41d7a7c359f85cf99d2fcf3e6cb0f74dcee2c\n");
 
 // codex/server.ts
 import readline from "node:readline";
@@ -16,10 +16,10 @@ import { EventEmitter } from "events";
 import net from "net";
 import { randomUUID as randomUUID2 } from "crypto";
 
-// node_modules/@dataforxyz/agent-intercom-core/dist/policy.js
+// ../../src/github.com/dataforxyz/agent-intercom-codex/node_modules/@dataforxyz/agent-intercom-core/dist/policy.js
 var POLICY_SEMANTICS_VERSION = 2;
 
-// node_modules/@dataforxyz/agent-intercom-core/dist/policy-vectors.js
+// ../../src/github.com/dataforxyz/agent-intercom-codex/node_modules/@dataforxyz/agent-intercom-core/dist/policy-vectors.js
 var localRoot = {
   id: "local-root",
   kind: "local",
