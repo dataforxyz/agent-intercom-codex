@@ -44,7 +44,7 @@
     "codex:mcp": "tsx codex/server.ts",
     "codex:bridge": "tsx codex/bridge-daemon.ts",
     "coi": "tsx codex/coi.ts",
-    "test": "node --import tsx --test --test-isolation=none broker/*.test.ts boss-control-outbox.test.ts outbound-outbox.test.ts codex/*.test.ts scripts/*.test.mjs",
+    "test": "node --import tsx --test broker/*.test.ts boss-control-outbox.test.ts outbound-outbox.test.ts codex/*.test.ts scripts/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
