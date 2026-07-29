@@ -2,9 +2,24 @@ import { EventEmitter } from "events";
 import net from "net";
 import { randomUUID } from "crypto";
 import { POLICY_SEMANTICS_HASH, POLICY_SEMANTICS_VERSION } from "@dataforxyz/agent-intercom-core";
+import {
+  BOSS_RUN_FEATURE,
+  parseBrokerCapabilityAdvertisement,
+  type BossControlEnvelope,
+} from "@dataforxyz/agent-intercom-core/boss";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { PersistentOutboundOutbox } from "../outbound-outbox.ts";
+import { PersistentBossControlOutbox } from "../boss-control-outbox.ts";
 import { loadRemoteAccessCredential, writeRemoteSessionCredential, type LoadedRemoteAccessCredential } from "./access-credential.ts";
+import { parseBossControlAck, parseBossControlResult } from "./boss-control-ledger.ts";
+import {
+  parseBossParticipantBindingMetadata,
+  parseBossParticipantRegistrationMetadata,
+  bossControlKind,
+  parseExactRegisteredFrame,
+  parseExactRegistrationFrame,
+} from "./boss-adapter.ts";
+import { types as nodeUtilTypes } from "node:util";
 import {
   getBrokerConnectTarget,
   INTERCOM_PROTOCOL_NAME,
@@ -18,6 +33,9 @@ import type {
   Message,
   Attachment,
   SessionRegistration,
+  BossParticipantBindingMetadata,
+  BossParticipantRegistrationMetadata,
+  BossControlFailureCode,
 } from "../types.ts";
 
 export interface SendOptions {
@@ -36,6 +54,24 @@ export interface SendResult {
   code?: DeliveryFailureCode;
   reason?: string;
 }
+
+export type BossControlSendResult = {
+  requestId: string;
+  messageId: string;
+  idempotencyKey: string;
+  status: "delivered";
+  delivered: true;
+  deliveryId: string;
+} | {
+  requestId: string;
+  messageId: string;
+  idempotencyKey: string;
+  status: "rejected";
+  delivered: false;
+  deliveryId?: string;
+  code: BossControlFailureCode;
+  reason: string;
+};
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -141,6 +177,13 @@ function isSessionInfo(value: unknown): value is SessionInfo {
   for (const field of ["depth", "maxDepth", "maxChildren"] as const) {
     if (session[field] !== undefined && (typeof session[field] !== "number" || !Number.isSafeInteger(session[field]))) return false;
   }
+  if (session.boss !== undefined) {
+    try {
+      parseBossParticipantBindingMetadata(session.boss, session.id);
+    } catch {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -175,8 +218,19 @@ export class IntercomClient extends EventEmitter {
   }>();
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
   private pendingAskControls = new Map<string, { resolve: (applied: boolean) => void; timeout: NodeJS.Timeout }>();
+  private pendingBossControls = new Map<string, {
+    messageId: string;
+    idempotencyKey: string;
+    deliveryId?: string;
+    resolve: (result: BossControlSendResult) => void;
+    reject: (error: Error) => void;
+    timeout: NodeJS.Timeout;
+  }>();
   private outbox: PersistentOutboundOutbox | null = null;
+  private bossControlOutbox: PersistentBossControlOutbox | null = null;
   private remoteAccessCredential: LoadedRemoteAccessCredential | undefined;
+  private requestedBossRegistration: BossParticipantRegistrationMetadata | undefined;
+  private _bossBinding: BossParticipantBindingMetadata | undefined;
   private disconnecting = false;
   private disconnectError: Error | null = null;
 
@@ -194,6 +248,11 @@ export class IntercomClient extends EventEmitter {
       pending.resolve(false);
     }
     this.pendingAskControls.clear();
+    for (const pending of this.pendingBossControls.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    this.pendingBossControls.clear();
   }
 
   get sessionId(): string | null {
@@ -202,6 +261,14 @@ export class IntercomClient extends EventEmitter {
 
   get outboxSize(): number {
     return this.outbox?.list().length ?? 0;
+  }
+
+  get bossBinding(): BossParticipantBindingMetadata | undefined {
+    return this._bossBinding;
+  }
+
+  get bossControlOutboxSize(): number {
+    return this.bossControlOutbox?.list().length ?? 0;
   }
 
   isConnected(): boolean {
@@ -229,6 +296,25 @@ export class IntercomClient extends EventEmitter {
   connect(session: SessionRegistration, sessionId?: string): Promise<void> {
     if (this.socket) {
       return Promise.reject(new Error("Already connected"));
+    }
+
+    try {
+      const canonicalSession = parseExactRegistrationFrame({
+        type: "register",
+        ...(typeof session === "object" && session !== null && !nodeUtilTypes.isProxy(session)
+          && Object.getOwnPropertyDescriptor(session, "boss") !== undefined
+          ? { registrationKind: "boss" as const }
+          : {}),
+        protocol: INTERCOM_PROTOCOL_NAME,
+        version: INTERCOM_PROTOCOL_VERSION,
+        session,
+      }).session;
+      this.requestedBossRegistration = session.boss === undefined
+        ? undefined
+        : parseBossParticipantRegistrationMetadata(session.boss);
+      if (canonicalSession !== session) throw new Error("Registration session identity changed during validation");
+    } catch (error) {
+      return Promise.reject(toError(error));
     }
 
     return new Promise((resolve, reject) => {
@@ -289,6 +375,8 @@ export class IntercomClient extends EventEmitter {
           this.socket = null;
         }
         this._sessionId = null;
+        this._bossBinding = undefined;
+        this.requestedBossRegistration = undefined;
         this.disconnectError = null;
         if (connectionEstablished && !wasDisconnecting) {
           this.emit("disconnected", disconnectError);
@@ -342,6 +430,7 @@ export class IntercomClient extends EventEmitter {
       try {
         writeMessage(socket, {
           type: "register",
+          ...(session.boss === undefined ? {} : { registrationKind: "boss" as const }),
           protocol: INTERCOM_PROTOCOL_NAME,
           version: INTERCOM_PROTOCOL_VERSION,
           session,
@@ -362,9 +451,16 @@ export class IntercomClient extends EventEmitter {
   }
 
   private handleBrokerMessage(msg: unknown): void {
-    if (typeof msg !== "object" || msg === null || !("type" in msg) || typeof msg.type !== "string") {
+    if (typeof msg !== "object" || msg === null || nodeUtilTypes.isProxy(msg)) {
       throw new Error("Invalid broker message");
     }
+    const typeDescriptor = Object.getOwnPropertyDescriptor(msg, "type");
+    if (
+      typeDescriptor === undefined
+      || !typeDescriptor.enumerable
+      || !Object.hasOwn(typeDescriptor, "value")
+      || typeof typeDescriptor.value !== "string"
+    ) throw new Error("Invalid broker message");
 
     const brokerMessage = msg as { type: string } & Record<string, unknown>;
 
@@ -374,6 +470,12 @@ export class IntercomClient extends EventEmitter {
 
     switch (brokerMessage.type) {
       case "registered": {
+        parseExactRegisteredFrame(
+          brokerMessage,
+          this.requestedBossRegistration === undefined
+            ? this.remoteAccessCredential === undefined ? "ordinary-local" : "ordinary-remote"
+            : "boss",
+        );
         if (
           typeof brokerMessage.sessionId !== "string"
           || brokerMessage.protocol !== INTERCOM_PROTOCOL_NAME
@@ -412,9 +514,39 @@ export class IntercomClient extends EventEmitter {
           }
         }
 
+
+        if (this.requestedBossRegistration !== undefined) {
+          if (brokerMessage.remoteAccess !== undefined || brokerMessage.access !== undefined) {
+            throw new Error("Boss registration returned folded remote-access metadata");
+          }
+          const advertisement = parseBrokerCapabilityAdvertisement(brokerMessage.capabilities);
+          if (!advertisement.features.some((feature) => feature.feature === BOSS_RUN_FEATURE)) {
+            throw new Error("Broker did not echo the required boss-run-v1 feature contract");
+          }
+          const binding = parseBossParticipantBindingMetadata(brokerMessage.boss, brokerMessage.sessionId);
+          const credential = this.requestedBossRegistration.credential;
+          if (
+            binding.featureContract.feature !== this.requestedBossRegistration.featureContract.feature
+            || binding.binding.bossRunId !== credential.bossRunId
+            || binding.binding.participantId !== credential.participantId
+            || binding.binding.role !== credential.role
+            || binding.binding.communicationProfile !== credential.communicationProfile
+            || binding.binding.bindingEpoch !== credential.bindingEpoch
+          ) {
+            throw new Error("Broker returned a Boss binding that does not match the authenticated registration request");
+          }
+          this._bossBinding = binding;
+        } else if (brokerMessage.boss !== undefined) {
+          throw new Error("Broker attached unsolicited Boss binding metadata to an ordinary registration");
+        }
+
         this._sessionId = brokerMessage.sessionId;
         this.outbox = new PersistentOutboundOutbox(brokerMessage.sessionId);
+        this.bossControlOutbox = this._bossBinding === undefined
+          ? null
+          : new PersistentBossControlOutbox(brokerMessage.sessionId);
         this.replayOutbox();
+        this.replayBossControlOutbox();
         this.emit("_registered", { type: "registered", sessionId: brokerMessage.sessionId });
         break;
       }
@@ -443,6 +575,64 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.emit("message", from, message, deliveryId);
+        break;
+      }
+
+      case "boss_control": {
+        const { deliveryId, from } = brokerMessage;
+        if (typeof deliveryId !== "string" || !isSessionInfo(from)) {
+          throw new Error("Invalid boss_control event");
+        }
+        // Keep every inbound envelope behind the adapter's recursive,
+        // proxy-zero-trap preflight before Core parses or reflects on it.
+        const envelope = bossControlKind(brokerMessage.envelope).envelope;
+        const source = from.boss === undefined
+          ? undefined
+          : parseBossParticipantBindingMetadata(from.boss, from.id).binding;
+        if (
+          source === undefined
+          || source.state !== "active"
+          || source.bossRunId !== envelope.bossRunId
+          || source.participantId !== envelope.participantId
+          || source.bindingEpoch !== envelope.bindingEpoch
+        ) throw new Error("Boss control event sender does not match its broker-owned binding");
+        this.emit("boss_control", from, envelope, deliveryId);
+        break;
+      }
+
+      case "boss_control_result": {
+        const result = parseBossControlResult(brokerMessage);
+        const { requestId, messageId, idempotencyKey, deliveryId } = result;
+        const stored = this.bossControlOutbox?.find(idempotencyKey);
+        if (!stored || stored.envelope.messageId !== requestId) throw new Error("Boss control result does not match the durable outbox binding");
+        const pending = this.pendingBossControls.get(requestId);
+        if (pending && (pending.messageId !== messageId || pending.idempotencyKey !== idempotencyKey)) {
+          throw new Error("Boss control result correlation does not match the pending request");
+        }
+        this.bossControlOutbox!.removeCorrelated(idempotencyKey, messageId, deliveryId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pendingBossControls.delete(requestId);
+          pending.resolve(result);
+        }
+        break;
+      }
+
+      case "boss_control_ack": {
+        const { requestId, messageId, idempotencyKey, deliveryId } = parseBossControlAck(brokerMessage);
+        const pending = this.pendingBossControls.get(requestId);
+        if (pending && (pending.messageId !== messageId || pending.idempotencyKey !== idempotencyKey)) {
+          throw new Error("Boss control acknowledgement correlation does not match the pending request");
+        }
+        const transition = this.bossControlOutbox?.markAccepted(idempotencyKey, messageId, deliveryId);
+        if (transition === undefined) throw new Error("Boss control acknowledgement has no durable outbox");
+        // A terminal replay is deliberately ACK-first. The exact ACK is
+        // idempotent when this durable accepted binding survived reconnect;
+        // markAccepted still rejects any changed correlation or deliveryId.
+        if (pending?.deliveryId !== undefined && pending.deliveryId !== deliveryId) {
+          throw new Error("Boss control acknowledgement changed the pending deliveryId");
+        }
+        if (pending) pending.deliveryId = deliveryId;
         break;
       }
 
@@ -739,6 +929,74 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
+  sendBossControl(to: string, envelopeValue: unknown): Promise<BossControlSendResult> {
+    let socket: net.Socket;
+    try {
+      socket = this.requireActiveSocket();
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+    let envelope: BossControlEnvelope;
+    try {
+      // Caller objects receive the same adapter-owned zero-trap boundary as
+      // broker-delivered envelopes; Core never sees a Proxy at any depth.
+      envelope = bossControlKind(envelopeValue).envelope;
+      const binding = this._bossBinding?.binding;
+      if (
+        binding === undefined
+        || binding.state !== "active"
+        || envelope.bossRunId !== binding.bossRunId
+        || envelope.participantId !== binding.participantId
+        || envelope.bindingEpoch !== binding.bindingEpoch
+      ) throw new Error("Boss control envelope does not match this client's active participant binding");
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+    const requestId = envelope.messageId;
+    if (this.pendingBossControls.has(requestId)) {
+      return Promise.resolve({
+        requestId,
+        messageId: envelope.messageId,
+        idempotencyKey: envelope.idempotencyKey,
+        status: "rejected",
+        delivered: false,
+        code: "INVALID_CONTROL",
+        reason: "Boss requestId is already pending",
+      });
+    }
+    try {
+      if (!this.bossControlOutbox) throw new Error("Durable Boss control outbox is unavailable");
+      this.bossControlOutbox.enqueue(to, envelope);
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!this.pendingBossControls.delete(requestId)) return;
+        reject(new Error("Boss control delivery timeout"));
+      }, 10000);
+      timeout.unref?.();
+      this.pendingBossControls.set(requestId, {
+        messageId: envelope.messageId,
+        idempotencyKey: envelope.idempotencyKey,
+        resolve,
+        reject,
+        timeout,
+      });
+      try {
+        writeMessage(socket, { type: "boss_control", requestId, to, envelope });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pendingBossControls.delete(requestId);
+        reject(toError(error));
+      }
+    });
+  }
+
+  acknowledgeBossControl(deliveryId: string, messageId: string, idempotencyKey: string): boolean {
+    return this.writeControlMessage({ type: "boss_control_received", deliveryId, messageId, idempotencyKey });
+  }
+
   acknowledgeMessage(deliveryId: string): boolean {
     return this.writeControlMessage({ type: "message_received", deliveryId });
   }
@@ -798,6 +1056,23 @@ export class IntercomClient extends EventEmitter {
       if (this.pendingSends.has(entry.message.id)) continue;
       try {
         writeMessage(socket, { type: "send", to: entry.to, message: entry.message });
+      } catch {
+        return;
+      }
+    }
+  }
+
+  private replayBossControlOutbox(): void {
+    const socket = this.socket;
+    if (!socket || socket.destroyed || !this._sessionId || !this.bossControlOutbox) return;
+    for (const entry of this.bossControlOutbox.list()) {
+      try {
+        writeMessage(socket, {
+          type: "boss_control",
+          requestId: entry.envelope.messageId,
+          to: entry.to,
+          envelope: entry.envelope,
+        });
       } catch {
         return;
       }

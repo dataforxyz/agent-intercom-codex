@@ -5,7 +5,7 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "main": "dist/codex-server.mjs",
   "bin": {
@@ -21,11 +21,13 @@
     "broker/**/*.ts",
     "!broker/**/*.test.ts",
     "scripts/**/*",
+    "!scripts/**/*.test.mjs",
     "skills/**/*",
     "types.ts",
     "config.ts",
     "tsconfig.json",
     "durable-json.ts",
+    "boss-control-outbox.ts",
     "outbound-outbox.ts",
     ".codex-plugin/**/*",
     ".mcp.json",
@@ -42,7 +44,7 @@
     "codex:mcp": "tsx codex/server.ts",
     "codex:bridge": "tsx codex/bridge-daemon.ts",
     "coi": "tsx codex/coi.ts",
-    "test": "tsx --test broker/*.test.ts outbound-outbox.test.ts codex/*.test.ts scripts/*.test.mjs",
+    "test": "node --import tsx --test --test-isolation=none broker/*.test.ts boss-control-outbox.test.ts outbound-outbox.test.ts codex/*.test.ts scripts/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
@@ -52,13 +54,14 @@
     "multi-agent",
     "pi"
   ],
-  "dependencies": {
-    "@dataforxyz/agent-intercom-core": "git+https://github.com/dataforxyz/agent-intercom-core.git#cb5d2212912db0cd8abbb16ab08e4b539424a05d"
+  "peerDependencies": {
+    "@dataforxyz/agent-intercom-core": "0.1.0"
   },
   "optionalDependencies": {
     "node-pty": "^1.1.0"
   },
   "devDependencies": {
+    "@dataforxyz/agent-intercom-core": "git+https://github.com/dataforxyz/agent-intercom-core.git#8316cbab548f422ad11c78ed887fabeef94817c1",
     "@types/node": "^24.0.0",
     "esbuild": "^0.28.1",
     "tsx": "^4.20.0",

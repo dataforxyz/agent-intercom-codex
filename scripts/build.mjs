@@ -14,8 +14,12 @@ const common = {
   bundle: true,
   platform: "node",
   format: "esm",
-  target: "node20",
+  target: "node22.19",
 };
+const coreExternals = [
+  "@dataforxyz/agent-intercom-core",
+  "@dataforxyz/agent-intercom-core/*",
+];
 const outputs = [
   { entry: "codex/server.ts", outfile: "dist/codex-server.mjs", target: "codex-server", executable: true },
   { entry: "broker/broker.ts", outfile: "dist/broker.mjs", target: "broker", executable: false },
@@ -28,7 +32,7 @@ await Promise.all(outputs.map((output) => build({
   entryPoints: [output.entry],
   outfile: output.outfile,
   banner: { js: buildBanner(identity(output.target), output.executable ? "#!/usr/bin/env node" : "") },
-  ...(output.external ? { external: output.external } : {}),
+  external: [...coreExternals, ...(output.external ?? [])],
 })));
 
 await writeFile("dist/build-info.json", `${JSON.stringify({

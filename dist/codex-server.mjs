@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-process.stderr.write("[agent-intercom-build] package=@dataforxyz/agent-intercom-codex version=0.10.0 target=codex-server sourceSha256=28cbe04c291ec9ca89e519b437e41d7a7c359f85cf99d2fcf3e6cb0f74dcee2c\n");
+process.stderr.write("[agent-intercom-build] package=@dataforxyz/agent-intercom-codex version=0.10.0 target=codex-server sourceSha256=e3924d8a81ca3579d920e6938f77fe75f36c8eeb02d45b49b2d940b7a67b6410\n");
 
 // codex/server.ts
 import readline from "node:readline";
 import { stdin, stdout } from "node:process";
 
 // codex/runtime.ts
-import { randomUUID as randomUUID4, createHash as createHash2 } from "crypto";
+import { randomUUID as randomUUID4, createHash as createHash3 } from "crypto";
 import { spawnSync } from "child_process";
 import { basename } from "path";
 import { cwd as processCwd } from "process";
@@ -15,166 +15,11 @@ import { cwd as processCwd } from "process";
 import { EventEmitter } from "events";
 import net from "net";
 import { randomUUID as randomUUID2 } from "crypto";
-
-// ../../src/github.com/dataforxyz/agent-intercom-codex/node_modules/@dataforxyz/agent-intercom-core/dist/policy.js
-var POLICY_SEMANTICS_VERSION = 2;
-
-// ../../src/github.com/dataforxyz/agent-intercom-codex/node_modules/@dataforxyz/agent-intercom-core/dist/policy-vectors.js
-var localRoot = {
-  id: "local-root",
-  kind: "local",
-  state: "active",
-  generation: 1,
-  policy: "local-public",
-  rootSessionId: "local-root"
-};
-var localPeer = {
-  id: "local-peer",
-  kind: "local",
-  state: "active",
-  generation: 1,
-  policy: "local-public",
-  rootSessionId: "local-peer"
-};
-var remoteManager = {
-  id: "remote-manager",
-  kind: "remote",
-  state: "active",
-  generation: 1,
-  policy: "remote-tree",
-  parentSessionId: "local-root",
-  rootSessionId: "local-root"
-};
-var remoteChild = {
-  id: "remote-child",
-  kind: "remote",
-  state: "active",
-  generation: 1,
-  policy: "remote-tree",
-  parentSessionId: "remote-manager",
-  rootSessionId: "local-root"
-};
-var remoteSibling = {
-  id: "remote-sibling",
-  kind: "remote",
-  state: "active",
-  generation: 1,
-  policy: "remote-tree",
-  parentSessionId: "remote-manager",
-  rootSessionId: "local-root"
-};
-var POLICY_VECTORS = [
-  {
-    name: "local sessions remain public",
-    principals: [localRoot, localPeer],
-    actorId: "local-root",
-    action: "send",
-    targetId: "local-peer",
-    expectedAllowed: true,
-    expectedReasonOrCode: "local-public"
-  },
-  {
-    name: "remote manager can reach direct local parent",
-    principals: [localRoot, remoteManager],
-    actorId: "remote-manager",
-    action: "send",
-    targetId: "local-root",
-    expectedAllowed: true,
-    expectedReasonOrCode: "direct-parent"
-  },
-  {
-    name: "local parent can reach direct remote child",
-    principals: [localRoot, remoteManager],
-    actorId: "local-root",
-    action: "ask",
-    targetId: "remote-manager",
-    expectedAllowed: true,
-    expectedReasonOrCode: "direct-parent"
-  },
-  {
-    name: "remote child can reach its local root through the ancestor chain",
-    principals: [localRoot, remoteManager, remoteChild],
-    actorId: "remote-child",
-    action: "send",
-    targetId: "local-root",
-    expectedAllowed: true,
-    expectedReasonOrCode: "ancestor-chain"
-  },
-  {
-    name: "remote siblings cannot communicate in phase one",
-    principals: [localRoot, remoteManager, remoteChild, remoteSibling],
-    actorId: "remote-child",
-    action: "discover",
-    targetId: "remote-sibling",
-    expectedAllowed: false,
-    expectedReasonOrCode: "POLICY_DENIED"
-  },
-  {
-    name: "unrelated local session cannot discover remote principal",
-    principals: [localRoot, localPeer, remoteManager],
-    actorId: "local-peer",
-    action: "discover",
-    targetId: "remote-manager",
-    expectedAllowed: false,
-    expectedReasonOrCode: "POLICY_DENIED"
-  },
-  {
-    name: "remote principal cannot reach unrelated local session",
-    principals: [localRoot, localPeer, remoteManager],
-    actorId: "remote-manager",
-    action: "send",
-    targetId: "local-peer",
-    expectedAllowed: false,
-    expectedReasonOrCode: "POLICY_DENIED"
-  },
-  {
-    name: "remote manager may inspect its descendant subtree",
-    principals: [localRoot, remoteManager, remoteChild],
-    actorId: "remote-manager",
-    action: "inspect_tree",
-    targetId: "remote-child",
-    expectedAllowed: true,
-    expectedReasonOrCode: "ancestor-control"
-  },
-  {
-    name: "remote child cannot revoke its ancestor",
-    principals: [localRoot, remoteManager, remoteChild],
-    actorId: "remote-child",
-    action: "revoke",
-    targetId: "remote-manager",
-    expectedAllowed: false,
-    expectedReasonOrCode: "POLICY_DENIED"
-  },
-  {
-    name: "remote principal may request attenuated delegation under itself",
-    principals: [localRoot, remoteManager],
-    actorId: "remote-manager",
-    action: "delegate_child",
-    targetId: "remote-manager",
-    expectedAllowed: true,
-    expectedReasonOrCode: "self"
-  },
-  {
-    name: "revoked principal cannot communicate",
-    principals: [localRoot, { ...remoteManager, state: "revoked" }],
-    actorId: "remote-manager",
-    action: "send",
-    targetId: "local-root",
-    expectedAllowed: false,
-    expectedReasonOrCode: "REVOKED_PRINCIPAL"
-  },
-  {
-    name: "stale actor generation cannot send",
-    principals: [localRoot, { ...remoteManager, generation: 2 }],
-    actorId: "remote-manager",
-    action: "send",
-    targetId: "local-root",
-    context: { actorGeneration: 1 },
-    expectedAllowed: false,
-    expectedReasonOrCode: "STALE_GENERATION"
-  }
-];
-var POLICY_SEMANTICS_HASH = "f3b00e503631bc91123aedfbcf1df72cc9913e1893c09728b2c598f3dcdfdfe0";
+import { POLICY_SEMANTICS_HASH, POLICY_SEMANTICS_VERSION } from "@dataforxyz/agent-intercom-core";
+import {
+  BOSS_RUN_FEATURE as BOSS_RUN_FEATURE2,
+  parseBrokerCapabilityAdvertisement as parseBrokerCapabilityAdvertisement2
+} from "@dataforxyz/agent-intercom-core/boss";
 
 // broker/framing.ts
 var MAX_FRAME_BYTES = 1024 * 1024;
@@ -425,8 +270,464 @@ var PersistentOutboundOutbox = class {
   }
 };
 
+// boss-control-outbox.ts
+import { createHash as createHash2 } from "node:crypto";
+import { chmodSync as chmodSync3, existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync as renameSync3 } from "node:fs";
+import { join as join3 } from "node:path";
+import { canonicalHash } from "@dataforxyz/agent-intercom-core/canonical";
+import { parseBossControlEnvelope as parseBossControlEnvelope2 } from "@dataforxyz/agent-intercom-core/boss";
+
+// broker/boss-adapter.ts
+import {
+  BOSS_CAPABILITY_FEATURE_DIGEST,
+  BOSS_CONTROL_ENVELOPE_VERSION,
+  BOSS_POLICY_PRINCIPAL_VERSION,
+  BOSS_POLICY_SEMANTICS_HASH,
+  BOSS_RUN_FEATURE,
+  BOSS_RUN_FEATURE_CONTRACT,
+  BOSS_RUN_FEATURE_SEMANTICS_HASH,
+  BOSS_RUN_FEATURE_VERSION,
+  BOSS_RUN_PROTOCOL_FEATURE_CONTRACT_HASH,
+  BROKER_FEATURE_ATTESTATION_VERSION,
+  INTERCOM_BASE_PROTOCOL_VERSION,
+  authorizeFeatureAware,
+  brokerFeatureSetHash,
+  parseBossControlEnvelope,
+  parseBossParticipantBinding,
+  parseBossParticipantCredentialEnvelope,
+  parseBossRunFeatureContract,
+  parseBrokerCapabilityAdvertisement,
+  parseParticipantState,
+  parseWorkerIdentityV2
+} from "@dataforxyz/agent-intercom-core/boss";
+import {
+  ContractValidationError,
+  assertExactKeys,
+  assertRecord,
+  canonicalJson
+} from "@dataforxyz/agent-intercom-core/canonical";
+import { types as nodeUtilTypes } from "node:util";
+var BOSS_ADVERTISEMENT_PREDICATES = [
+  "protectedProvider",
+  "brokerIdentity",
+  "credentialRegistry",
+  "authorityTransitions",
+  "participantHealth"
+];
+var DORMANT_BOSS_ADVERTISEMENT_READINESS = Object.freeze({
+  protectedProvider: false,
+  brokerIdentity: false,
+  credentialRegistry: false,
+  authorityTransitions: false,
+  participantHealth: false
+});
+var ORDINARY_SESSION_REGISTRATION_KEYS = [
+  "cwd",
+  "model",
+  "pid",
+  "startedAt",
+  "lastActivity"
+];
+var OPTIONAL_SESSION_REGISTRATION_KEYS = ["name", "status", "runtimeInstanceId"];
+function assertBossCanonicalData(value, path = "$", seen = /* @__PURE__ */ new WeakSet()) {
+  if (typeof value !== "object" || value === null) return;
+  if (nodeUtilTypes.isProxy(value)) {
+    throw new ContractValidationError(path, "proxies are not supported");
+  }
+  if (seen.has(value)) throw new ContractValidationError(path, "cyclic values are not supported");
+  seen.add(value);
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) {
+      throw new ContractValidationError(path, "must use the exact Array prototype");
+    }
+    const ownKeys = Reflect.ownKeys(value);
+    const expectedKeys = /* @__PURE__ */ new Set(["length"]);
+    for (let index = 0; index < value.length; index += 1) expectedKeys.add(String(index));
+    if (ownKeys.length !== expectedKeys.size || ownKeys.some((key) => !expectedKeys.has(key))) {
+      throw new ContractValidationError(path, "must be a dense array without symbols or extra properties");
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.hasOwn(value, index)) {
+        throw new ContractValidationError(`${path}[${index}]`, "sparse array holes are not supported");
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (descriptor === void 0 || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) {
+        throw new ContractValidationError(`${path}[${index}]`, "must be an own enumerable data property");
+      }
+      assertBossCanonicalData(descriptor.value, `${path}[${index}]`, seen);
+    }
+    return;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new ContractValidationError(path, "must use the exact Object prototype");
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") throw new ContractValidationError(path, "symbol properties are not supported");
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === void 0 || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) {
+      throw new ContractValidationError(`${path}.${key}`, "must be an own enumerable data property");
+    }
+    assertBossCanonicalData(descriptor.value, `${path}.${key}`, seen);
+  }
+}
+function parseBossAdvertisementReadiness(value) {
+  assertBossCanonicalData(value, "$.readiness");
+  assertRecord(value);
+  assertExactKeys(value, BOSS_ADVERTISEMENT_PREDICATES);
+  const parsed = {};
+  for (const predicate of BOSS_ADVERTISEMENT_PREDICATES) {
+    const enabled = ownDataValue(value, predicate);
+    if (typeof enabled !== "boolean") {
+      throw new ContractValidationError(`$.readiness.${predicate}`, "must be a boolean");
+    }
+    parsed[predicate] = enabled;
+  }
+  return parsed;
+}
+function missingBossAdvertisementPredicates(readiness = DORMANT_BOSS_ADVERTISEMENT_READINESS) {
+  const parsed = parseBossAdvertisementReadiness(readiness);
+  return BOSS_ADVERTISEMENT_PREDICATES.filter((predicate) => parsed[predicate] !== true);
+}
+function bossCapabilityAdvertisement(readiness = DORMANT_BOSS_ADVERTISEMENT_READINESS) {
+  if (missingBossAdvertisementPredicates(readiness).length > 0) return void 0;
+  const features = [{
+    version: BROKER_FEATURE_ATTESTATION_VERSION,
+    feature: BOSS_RUN_FEATURE,
+    featureVersion: BOSS_RUN_FEATURE_VERSION,
+    semanticsHash: BOSS_RUN_FEATURE_SEMANTICS_HASH,
+    controlEnvelopeVersion: BOSS_CONTROL_ENVELOPE_VERSION,
+    capabilityDigest: BOSS_CAPABILITY_FEATURE_DIGEST
+  }];
+  return parseBrokerCapabilityAdvertisement({
+    baseProtocolVersion: INTERCOM_BASE_PROTOCOL_VERSION,
+    features,
+    protocolFeatureContractHash: BOSS_RUN_PROTOCOL_FEATURE_CONTRACT_HASH,
+    featureSetHash: brokerFeatureSetHash(features),
+    controlEnvelopeVersion: BOSS_CONTROL_ENVELOPE_VERSION,
+    capabilityDigest: BOSS_CAPABILITY_FEATURE_DIGEST
+  });
+}
+function optionalOwnDataValue(value, key) {
+  assertRecord(value);
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === void 0) return void 0;
+  if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value")) {
+    throw new ContractValidationError(`$.${key}`, "must be an own enumerable data property");
+  }
+  return descriptor.value;
+}
+function ownDataValue(value, key) {
+  const result = optionalOwnDataValue(value, key);
+  if (result === void 0) throw new ContractValidationError(`$.${key}`, "is required");
+  return result;
+}
+function parseBossParticipantRegistrationMetadata(value) {
+  assertBossCanonicalData(value);
+  assertRecord(value);
+  assertExactKeys(value, ["featureContract", "credential"]);
+  const featureContract = parseBossRunFeatureContract(ownDataValue(value, "featureContract"));
+  if (featureContract.baseProtocolVersion !== INTERCOM_BASE_PROTOCOL_VERSION || canonicalJson(featureContract) !== canonicalJson(BOSS_RUN_FEATURE_CONTRACT)) {
+    throw new ContractValidationError("$.featureContract", "must exactly negotiate boss-run-v1 over base protocol v3");
+  }
+  const credential = parseBossParticipantCredentialEnvelope(ownDataValue(value, "credential"));
+  if (credential.namespace !== featureContract.feature) {
+    throw new ContractValidationError("$.credential.namespace", "must match the negotiated feature namespace");
+  }
+  return { featureContract, credential };
+}
+function exactRegistrationKind(session, value) {
+  assertBossCanonicalData(session, "$.session");
+  assertRecord(session);
+  const boss = optionalOwnDataValue(session, "boss");
+  if (boss === void 0) {
+    if (value === void 0) return "ordinary";
+    throw new ContractValidationError("$.registrationKind", "must be absent when Boss metadata is absent");
+  }
+  if (value !== "boss") {
+    throw new ContractValidationError("$.registrationKind", "must be boss when Boss metadata is present");
+  }
+  return "boss";
+}
+function parseExactRegistrationFrame(value) {
+  assertBossCanonicalData(value, "$.register");
+  assertRecord(value);
+  const session = ownDataValue(value, "session");
+  assertRecord(session);
+  const registrationKind = optionalOwnDataValue(value, "registrationKind");
+  const kind = exactRegistrationKind(session, registrationKind);
+  if (kind === "ordinary") {
+    assertExactKeys(value, ["type", "protocol", "version", "session"], ["sessionId", "stateId", "access"]);
+    assertExactKeys(session, ORDINARY_SESSION_REGISTRATION_KEYS, OPTIONAL_SESSION_REGISTRATION_KEYS);
+  } else {
+    assertExactKeys(value, ["type", "registrationKind", "protocol", "version", "session"], ["sessionId", "stateId"]);
+    assertExactKeys(session, [...ORDINARY_SESSION_REGISTRATION_KEYS, "boss"], OPTIONAL_SESSION_REGISTRATION_KEYS);
+    parseBossParticipantRegistrationMetadata(ownDataValue(session, "boss"));
+  }
+  if (ownDataValue(value, "type") !== "register") {
+    throw new ContractValidationError("$.register.type", "must be register");
+  }
+  return value;
+}
+function parseExactRegisteredFrame(value, expected) {
+  assertBossCanonicalData(value, "$.registered");
+  assertRecord(value);
+  if (expected === "boss") {
+    assertExactKeys(value, ["type", "registrationKind", "sessionId", "protocol", "version", "capabilities", "boss"]);
+    if (ownDataValue(value, "registrationKind") !== "boss") {
+      throw new ContractValidationError("$.registered.registrationKind", "must be boss");
+    }
+    const sessionId = ownDataValue(value, "sessionId");
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw new ContractValidationError("$.registered.sessionId", "must be a non-empty string");
+    }
+    const advertisement = parseBrokerCapabilityAdvertisement(ownDataValue(value, "capabilities"));
+    const expectedAdvertisement = bossCapabilityAdvertisement({
+      protectedProvider: true,
+      brokerIdentity: true,
+      credentialRegistry: true,
+      authorityTransitions: true,
+      participantHealth: true
+    });
+    const bossFeature = advertisement.features.find((feature) => feature.feature === BOSS_RUN_FEATURE);
+    if (bossFeature === void 0 || canonicalJson(bossFeature) !== canonicalJson(expectedAdvertisement.features[0]) || advertisement.baseProtocolVersion !== expectedAdvertisement.baseProtocolVersion || advertisement.protocolFeatureContractHash !== expectedAdvertisement.protocolFeatureContractHash || advertisement.controlEnvelopeVersion !== expectedAdvertisement.controlEnvelopeVersion || advertisement.capabilityDigest !== expectedAdvertisement.capabilityDigest) throw new ContractValidationError("$.registered.capabilities", "must exactly echo the requested boss-run-v1 contract");
+    parseBossParticipantBindingMetadata(ownDataValue(value, "boss"), sessionId);
+  } else if (expected === "ordinary-remote") {
+    assertExactKeys(value, ["type", "sessionId", "protocol", "version", "remoteAccess", "access"]);
+  } else {
+    assertExactKeys(value, ["type", "sessionId", "protocol", "version"]);
+  }
+  if (ownDataValue(value, "type") !== "registered") {
+    throw new ContractValidationError("$.registered.type", "must be registered");
+  }
+  return value;
+}
+function parseBossParticipantBindingMetadata(value, expectedSessionId) {
+  assertBossCanonicalData(value);
+  assertRecord(value);
+  assertExactKeys(
+    value,
+    ["featureContract", "binding", "brokerIdentityVerified"],
+    ["assignedParticipantIds", "requestingPrincipalId", "workerIdentity", "participantState"]
+  );
+  const featureContract = parseBossRunFeatureContract(ownDataValue(value, "featureContract"));
+  if (featureContract.baseProtocolVersion !== INTERCOM_BASE_PROTOCOL_VERSION || canonicalJson(featureContract) !== canonicalJson(BOSS_RUN_FEATURE_CONTRACT)) {
+    throw new ContractValidationError("$.featureContract", "must exactly bind boss-run-v1 over base protocol v3");
+  }
+  const binding = parseBossParticipantBinding(ownDataValue(value, "binding"));
+  if (ownDataValue(value, "brokerIdentityVerified") !== true) {
+    throw new ContractValidationError("$.brokerIdentityVerified", "must be true for a broker-owned Boss binding");
+  }
+  if (expectedSessionId !== void 0 && binding.sessionId !== expectedSessionId) {
+    throw new ContractValidationError("$.binding.sessionId", "must match the registered intercom session");
+  }
+  const rawAssignedParticipantIds = optionalOwnDataValue(value, "assignedParticipantIds");
+  let assignedParticipantIds;
+  if (rawAssignedParticipantIds !== void 0) {
+    if (binding.role !== "manager" || !Array.isArray(rawAssignedParticipantIds) || rawAssignedParticipantIds.some((entry) => typeof entry !== "string" || entry.length === 0) || new Set(rawAssignedParticipantIds).size !== rawAssignedParticipantIds.length) {
+      throw new ContractValidationError("$.assignedParticipantIds", "must be a unique participant list present only for a Manager");
+    }
+    assignedParticipantIds = rawAssignedParticipantIds;
+  }
+  if (binding.role === "manager" && assignedParticipantIds === void 0) {
+    throw new ContractValidationError("$.assignedParticipantIds", "is required for a Manager policy binding");
+  }
+  const rawRequestingPrincipalId = optionalOwnDataValue(value, "requestingPrincipalId");
+  if (binding.role === "council" !== (typeof rawRequestingPrincipalId === "string" && rawRequestingPrincipalId.length > 0)) {
+    throw new ContractValidationError("$.requestingPrincipalId", "is required exactly for a Council policy binding");
+  }
+  const requestingPrincipalId = typeof rawRequestingPrincipalId === "string" ? rawRequestingPrincipalId : void 0;
+  const rawWorkerIdentity = optionalOwnDataValue(value, "workerIdentity");
+  const rawParticipantState = optionalOwnDataValue(value, "participantState");
+  if (rawWorkerIdentity === void 0 !== (rawParticipantState === void 0)) {
+    throw new ContractValidationError("$.workerIdentity", "workerIdentity and participantState must be supplied together");
+  }
+  const workerIdentity = rawWorkerIdentity === void 0 ? void 0 : parseWorkerIdentityV2(rawWorkerIdentity);
+  const participantState = rawParticipantState === void 0 ? void 0 : parseParticipantState(rawParticipantState, "$.participantState");
+  if (workerIdentity !== void 0 && (!("bossRunId" in workerIdentity) || workerIdentity.bossRunId !== binding.bossRunId || workerIdentity.participantId !== binding.participantId || workerIdentity.bindingEpoch !== binding.bindingEpoch)) throw new ContractValidationError("$.workerIdentity", "must match the broker-owned participant binding");
+  return {
+    featureContract,
+    binding,
+    brokerIdentityVerified: true,
+    ...assignedParticipantIds === void 0 ? {} : { assignedParticipantIds: [...assignedParticipantIds] },
+    ...requestingPrincipalId === void 0 ? {} : { requestingPrincipalId },
+    ...workerIdentity === void 0 ? {} : { workerIdentity, participantState }
+  };
+}
+var BOSS_CONTROL_KIND_BY_TYPE = {
+  "boss.assignment.created": "assignment_request",
+  "boss.assignment.accepted": "assignment_response",
+  "boss.assignment.checkpoint": "assignment_response",
+  "boss.assignment.submitted": "assignment_response",
+  "boss.assignment.rejected": "assignment_response",
+  "boss.assignment.cancelled": "lifecycle",
+  "boss.staffing.requested": "staffing",
+  "boss.staffing.resolved": "staffing",
+  "boss.review.requested": "review_request",
+  "boss.review.submitted": "review_result",
+  "boss.council.requested": "review_request",
+  "boss.council.submitted": "review_result",
+  "boss.proof.submitted": "proof",
+  "boss.worker.health": "health",
+  "boss.worker.blocked": "health",
+  "boss.worker.failed": "health",
+  "boss.worker.notice": "lifecycle",
+  "boss.worker.notice_delivery_failed": "lifecycle",
+  "boss.decision.required": "decision"
+};
+function bossControlKind(envelopeValue) {
+  assertBossCanonicalData(envelopeValue);
+  const envelope = parseBossControlEnvelope(envelopeValue);
+  return { envelope, controlKind: BOSS_CONTROL_KIND_BY_TYPE[envelope.type] };
+}
+
+// boss-control-outbox.ts
+var BOSS_CONTROL_OUTBOX_VERSION = 2;
+var MAX_BOSS_CONTROL_OUTBOX_ENTRIES = 256;
+function scope(envelope) {
+  return canonicalHash("agent-intercom-codex/boss-control/outbox-scope/v1", {
+    bossRunId: envelope.bossRunId,
+    participantId: envelope.participantId,
+    bindingEpoch: Number(envelope.bindingEpoch),
+    idempotencyKey: envelope.idempotencyKey
+  });
+}
+function fingerprint2(to, envelope) {
+  const { messageId: _transportMessageId, ...stableEnvelope } = envelope;
+  return canonicalHash("agent-intercom-codex/boss-control/outbox-request/v1", { to, envelope: stableEnvelope });
+}
+function exactKeys(value, required, optional = []) {
+  const permitted = /* @__PURE__ */ new Set([...required, ...optional]);
+  const keys = Reflect.ownKeys(value);
+  return required.every((key) => Object.hasOwn(value, key)) && keys.every((key) => typeof key === "string" && permitted.has(key));
+}
+function parseEntry(value) {
+  assertBossCanonicalData(value, "$.bossControlOutbox.entries[]");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid Boss outbox entry");
+  const entry = value;
+  if (!exactKeys(entry, ["to", "envelope", "scope", "fingerprint", "queuedAt", "state"], ["deliveryId"])) {
+    throw new Error("Invalid Boss outbox entry fields");
+  }
+  if (typeof entry.to !== "string" || entry.to.length === 0 || typeof entry.scope !== "string" || !/^[a-f0-9]{64}$/.test(entry.scope) || typeof entry.fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(entry.fingerprint) || typeof entry.queuedAt !== "number" || !Number.isSafeInteger(entry.queuedAt) || entry.state !== "queued" && entry.state !== "accepted" || entry.state === "queued" && Object.hasOwn(entry, "deliveryId") || entry.state === "accepted" && (!Object.hasOwn(entry, "deliveryId") || typeof entry.deliveryId !== "string" || entry.deliveryId.length === 0)) throw new Error("Invalid Boss outbox entry binding");
+  const envelope = parseBossControlEnvelope2(entry.envelope);
+  if (entry.scope !== scope(envelope) || entry.fingerprint !== fingerprint2(entry.to, envelope)) {
+    throw new Error("Boss outbox entry canonical binding mismatch");
+  }
+  return {
+    to: entry.to,
+    envelope,
+    scope: entry.scope,
+    fingerprint: entry.fingerprint,
+    queuedAt: entry.queuedAt,
+    state: entry.state,
+    ...entry.deliveryId === void 0 ? {} : { deliveryId: entry.deliveryId }
+  };
+}
+function fileName2(sessionId) {
+  return `${createHash2("sha256").update(sessionId).digest("hex")}.json`;
+}
+var PersistentBossControlOutbox = class {
+  path;
+  state;
+  constructor(sessionId, intercomDir = getIntercomDirPath()) {
+    ensureIntercomRuntimeDir(intercomDir);
+    const directory = join3(intercomDir, "boss-control-outbox");
+    mkdirSync3(directory, { recursive: true, mode: INTERCOM_DIR_MODE });
+    if (process.platform !== "win32") chmodSync3(directory, INTERCOM_DIR_MODE);
+    this.path = join3(directory, fileName2(sessionId));
+    this.state = this.load();
+  }
+  list() {
+    return structuredClone(this.state.entries);
+  }
+  find(idempotencyKey) {
+    const entry = this.state.entries.find((candidate) => candidate.envelope.idempotencyKey === idempotencyKey);
+    return entry === void 0 ? void 0 : structuredClone(entry);
+  }
+  enqueue(to, envelopeValue) {
+    if (typeof to !== "string" || to.length === 0) throw new Error("Boss target session ID is required");
+    assertBossCanonicalData(envelopeValue, "$.envelope");
+    const envelope = parseBossControlEnvelope2(envelopeValue);
+    const candidateScope = scope(envelope);
+    const candidateFingerprint = fingerprint2(to, envelope);
+    const existing = this.state.entries.find((entry) => entry.scope === candidateScope);
+    if (existing) {
+      if (existing.fingerprint !== candidateFingerprint) {
+        throw new Error(`Boss idempotency key ${envelope.idempotencyKey} is queued with a different canonical request`);
+      }
+      if (existing.envelope.messageId !== envelope.messageId) {
+        existing.envelope = envelope;
+        existing.queuedAt = Date.now();
+        this.persist();
+      }
+      return "existing";
+    }
+    if (this.state.entries.some((entry) => entry.envelope.messageId === envelope.messageId)) {
+      throw new Error(`Boss message ID ${envelope.messageId} is queued with a different idempotency scope`);
+    }
+    if (this.state.entries.length >= MAX_BOSS_CONTROL_OUTBOX_ENTRIES) throw new Error("Durable Boss control outbox is full");
+    this.state.entries.push({
+      to,
+      envelope,
+      scope: candidateScope,
+      fingerprint: candidateFingerprint,
+      queuedAt: Date.now(),
+      state: "queued"
+    });
+    this.persist();
+    return "added";
+  }
+  markAccepted(idempotencyKey, messageId, deliveryId) {
+    const entry = this.state.entries.find((candidate) => candidate.envelope.idempotencyKey === idempotencyKey);
+    if (!entry || entry.envelope.messageId !== messageId || !deliveryId) {
+      throw new Error("Boss acknowledgement does not match the durable outbox binding");
+    }
+    if (entry.state === "accepted") {
+      if (entry.deliveryId !== deliveryId) throw new Error("Boss acknowledgement changed the durable deliveryId");
+      return "already-accepted";
+    }
+    entry.state = "accepted";
+    entry.deliveryId = deliveryId;
+    this.persist();
+    return "accepted";
+  }
+  removeCorrelated(idempotencyKey, messageId, deliveryId) {
+    const index = this.state.entries.findIndex((candidate) => candidate.envelope.idempotencyKey === idempotencyKey);
+    if (index < 0) throw new Error("Boss terminal result has no durable outbox binding");
+    const entry = this.state.entries[index];
+    if (entry.envelope.messageId !== messageId) throw new Error("Boss terminal result messageId does not match the durable caller");
+    if (deliveryId === void 0) {
+      if (entry.state !== "queued") throw new Error("Boss post-acceptance failure omitted the durable deliveryId");
+    } else if (entry.state !== "accepted" || entry.deliveryId !== deliveryId) {
+      throw new Error("Boss terminal result arrived before the matching durable acknowledgement");
+    }
+    this.state.entries.splice(index, 1);
+    this.persist();
+  }
+  load() {
+    if (!existsSync2(this.path)) return { version: BOSS_CONTROL_OUTBOX_VERSION, entries: [] };
+    try {
+      const parsed = JSON.parse(readFileSync3(this.path, "utf8"));
+      assertBossCanonicalData(parsed, "$.bossControlOutbox");
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("expected object");
+      const state = parsed;
+      if (!exactKeys(state, ["version", "entries"]) || state.version !== BOSS_CONTROL_OUTBOX_VERSION || !Array.isArray(state.entries)) {
+        throw new Error("invalid Boss outbox state");
+      }
+      return { version: BOSS_CONTROL_OUTBOX_VERSION, entries: state.entries.map(parseEntry) };
+    } catch (error2) {
+      const corruptPath = `${this.path}.corrupt-${Date.now()}`;
+      renameSync3(this.path, corruptPath);
+      restrictIntercomRuntimeFile(corruptPath);
+      throw new Error(`Boss control outbox was corrupt and quarantined at ${corruptPath}`, { cause: error2 });
+    }
+  }
+  persist() {
+    writeDurableJson(this.path, this.state);
+  }
+};
+
 // broker/access-credential.ts
-import { readFileSync as readFileSync3 } from "fs";
+import { readFileSync as readFileSync4 } from "fs";
 var ACCESS_CREDENTIAL_ENV = "AGENT_INTERCOM_ACCESS_CREDENTIAL_PATH";
 var ACCESS_CREDENTIAL_VERSION = 1;
 function nonEmptyString(value) {
@@ -435,7 +736,7 @@ function nonEmptyString(value) {
 function loadRemoteAccessCredential(env = process.env) {
   const path = env[ACCESS_CREDENTIAL_ENV]?.trim();
   if (!path) return void 0;
-  const parsed = JSON.parse(readFileSync3(path, "utf8"));
+  const parsed = JSON.parse(readFileSync4(path, "utf8"));
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`Invalid Agent Intercom access credential at ${path}`);
   }
@@ -468,7 +769,49 @@ function writeRemoteSessionCredential(path, sessionId, metadata) {
   });
 }
 
+// broker/boss-control-ledger.ts
+import { canonicalJson as canonicalJson2 } from "@dataforxyz/agent-intercom-core/canonical";
+var BOSS_CONTROL_FAILURE_CODES = /* @__PURE__ */ new Set([
+  "INVALID_CONTROL",
+  "IDEMPOTENCY_CONFLICT",
+  "SESSION_NOT_FOUND",
+  "POLICY_DENIED",
+  "RECIPIENT_DISCONNECTED",
+  "DELIVERY_TIMEOUT"
+]);
+function exactStringKeys(value, required, optional = []) {
+  const keys = Reflect.ownKeys(value);
+  const permitted = /* @__PURE__ */ new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key)) && keys.every((key) => typeof key === "string" && permitted.has(key));
+}
+function parseBossControlResult(value) {
+  assertBossCanonicalData(value, "$.bossControlResult");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Boss control result must be an exact plain object");
+  }
+  const result = value;
+  const base = typeof result.requestId === "string" && result.requestId.length > 0 && result.messageId === result.requestId && typeof result.idempotencyKey === "string" && result.idempotencyKey.length > 0;
+  if (!base || result.type !== "boss_control_result") throw new Error("Invalid Boss control result binding");
+  if (result.status === "delivered" && result.delivered === true && typeof result.deliveryId === "string" && result.deliveryId.length > 0 && exactStringKeys(result, ["type", "requestId", "messageId", "idempotencyKey", "status", "delivered", "deliveryId"])) return result;
+  if (result.status === "rejected" && result.delivered === false && typeof result.code === "string" && BOSS_CONTROL_FAILURE_CODES.has(result.code) && typeof result.reason === "string" && result.reason.length > 0 && (!Object.hasOwn(result, "deliveryId") || typeof result.deliveryId === "string" && result.deliveryId.length > 0) && exactStringKeys(
+    result,
+    ["type", "requestId", "messageId", "idempotencyKey", "status", "delivered", "code", "reason"],
+    ["deliveryId"]
+  )) return result;
+  throw new Error("Invalid Boss control result discriminant");
+}
+function parseBossControlAck(value) {
+  assertBossCanonicalData(value, "$.bossControlAck");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Boss control acknowledgement must be an exact plain object");
+  }
+  const ack = value;
+  if (!exactStringKeys(ack, ["type", "requestId", "messageId", "idempotencyKey", "status", "deliveryId"]) || ack.type !== "boss_control_ack" || typeof ack.requestId !== "string" || ack.requestId.length === 0 || ack.messageId !== ack.requestId || typeof ack.idempotencyKey !== "string" || ack.idempotencyKey.length === 0 || ack.status !== "accepted" || typeof ack.deliveryId !== "string" || ack.deliveryId.length === 0) throw new Error("Invalid Boss control acknowledgement discriminant");
+  return ack;
+}
+
 // broker/client.ts
+import { types as nodeUtilTypes2 } from "node:util";
 function toError(error2) {
   return error2 instanceof Error ? error2 : new Error(String(error2));
 }
@@ -538,6 +881,13 @@ function isSessionInfo(value) {
   for (const field of ["depth", "maxDepth", "maxChildren"]) {
     if (session[field] !== void 0 && (typeof session[field] !== "number" || !Number.isSafeInteger(session[field]))) return false;
   }
+  if (session.boss !== void 0) {
+    try {
+      parseBossParticipantBindingMetadata(session.boss, session.id);
+    } catch {
+      return false;
+    }
+  }
   return true;
 }
 function isRemoteAccessMetadata(value) {
@@ -551,8 +901,12 @@ var IntercomClient = class extends EventEmitter {
   pendingSends = /* @__PURE__ */ new Map();
   pendingLists = /* @__PURE__ */ new Map();
   pendingAskControls = /* @__PURE__ */ new Map();
+  pendingBossControls = /* @__PURE__ */ new Map();
   outbox = null;
+  bossControlOutbox = null;
   remoteAccessCredential;
+  requestedBossRegistration;
+  _bossBinding;
   disconnecting = false;
   disconnectError = null;
   failPending(error2) {
@@ -569,12 +923,23 @@ var IntercomClient = class extends EventEmitter {
       pending.resolve(false);
     }
     this.pendingAskControls.clear();
+    for (const pending of this.pendingBossControls.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error2);
+    }
+    this.pendingBossControls.clear();
   }
   get sessionId() {
     return this._sessionId;
   }
   get outboxSize() {
     return this.outbox?.list().length ?? 0;
+  }
+  get bossBinding() {
+    return this._bossBinding;
+  }
+  get bossControlOutboxSize() {
+    return this.bossControlOutbox?.list().length ?? 0;
   }
   isConnected() {
     const socket = this.socket;
@@ -596,6 +961,19 @@ var IntercomClient = class extends EventEmitter {
   connect(session, sessionId) {
     if (this.socket) {
       return Promise.reject(new Error("Already connected"));
+    }
+    try {
+      const canonicalSession = parseExactRegistrationFrame({
+        type: "register",
+        ...typeof session === "object" && session !== null && !nodeUtilTypes2.isProxy(session) && Object.getOwnPropertyDescriptor(session, "boss") !== void 0 ? { registrationKind: "boss" } : {},
+        protocol: INTERCOM_PROTOCOL_NAME,
+        version: INTERCOM_PROTOCOL_VERSION,
+        session
+      }).session;
+      this.requestedBossRegistration = session.boss === void 0 ? void 0 : parseBossParticipantRegistrationMetadata(session.boss);
+      if (canonicalSession !== session) throw new Error("Registration session identity changed during validation");
+    } catch (error2) {
+      return Promise.reject(toError(error2));
     }
     return new Promise((resolve3, reject) => {
       let socket;
@@ -651,6 +1029,8 @@ var IntercomClient = class extends EventEmitter {
           this.socket = null;
         }
         this._sessionId = null;
+        this._bossBinding = void 0;
+        this.requestedBossRegistration = void 0;
         this.disconnectError = null;
         if (connectionEstablished && !wasDisconnecting) {
           this.emit("disconnected", disconnectError);
@@ -696,6 +1076,7 @@ var IntercomClient = class extends EventEmitter {
       try {
         writeMessage(socket, {
           type: "register",
+          ...session.boss === void 0 ? {} : { registrationKind: "boss" },
           protocol: INTERCOM_PROTOCOL_NAME,
           version: INTERCOM_PROTOCOL_VERSION,
           session,
@@ -715,15 +1096,21 @@ var IntercomClient = class extends EventEmitter {
     });
   }
   handleBrokerMessage(msg) {
-    if (typeof msg !== "object" || msg === null || !("type" in msg) || typeof msg.type !== "string") {
+    if (typeof msg !== "object" || msg === null || nodeUtilTypes2.isProxy(msg)) {
       throw new Error("Invalid broker message");
     }
+    const typeDescriptor = Object.getOwnPropertyDescriptor(msg, "type");
+    if (typeDescriptor === void 0 || !typeDescriptor.enumerable || !Object.hasOwn(typeDescriptor, "value") || typeof typeDescriptor.value !== "string") throw new Error("Invalid broker message");
     const brokerMessage = msg;
     if (this._sessionId === null && brokerMessage.type !== "registered" && brokerMessage.type !== "error") {
       throw new Error(`Received ${brokerMessage.type} before registered`);
     }
     switch (brokerMessage.type) {
       case "registered": {
+        parseExactRegisteredFrame(
+          brokerMessage,
+          this.requestedBossRegistration === void 0 ? this.remoteAccessCredential === void 0 ? "ordinary-local" : "ordinary-remote" : "boss"
+        );
         if (typeof brokerMessage.sessionId !== "string" || brokerMessage.protocol !== INTERCOM_PROTOCOL_NAME || brokerMessage.version !== INTERCOM_PROTOCOL_VERSION) {
           throw new Error("Invalid registered message");
         }
@@ -748,9 +1135,28 @@ var IntercomClient = class extends EventEmitter {
             }
           }
         }
+        if (this.requestedBossRegistration !== void 0) {
+          if (brokerMessage.remoteAccess !== void 0 || brokerMessage.access !== void 0) {
+            throw new Error("Boss registration returned folded remote-access metadata");
+          }
+          const advertisement = parseBrokerCapabilityAdvertisement2(brokerMessage.capabilities);
+          if (!advertisement.features.some((feature) => feature.feature === BOSS_RUN_FEATURE2)) {
+            throw new Error("Broker did not echo the required boss-run-v1 feature contract");
+          }
+          const binding = parseBossParticipantBindingMetadata(brokerMessage.boss, brokerMessage.sessionId);
+          const credential = this.requestedBossRegistration.credential;
+          if (binding.featureContract.feature !== this.requestedBossRegistration.featureContract.feature || binding.binding.bossRunId !== credential.bossRunId || binding.binding.participantId !== credential.participantId || binding.binding.role !== credential.role || binding.binding.communicationProfile !== credential.communicationProfile || binding.binding.bindingEpoch !== credential.bindingEpoch) {
+            throw new Error("Broker returned a Boss binding that does not match the authenticated registration request");
+          }
+          this._bossBinding = binding;
+        } else if (brokerMessage.boss !== void 0) {
+          throw new Error("Broker attached unsolicited Boss binding metadata to an ordinary registration");
+        }
         this._sessionId = brokerMessage.sessionId;
         this.outbox = new PersistentOutboundOutbox(brokerMessage.sessionId);
+        this.bossControlOutbox = this._bossBinding === void 0 ? null : new PersistentBossControlOutbox(brokerMessage.sessionId);
         this.replayOutbox();
+        this.replayBossControlOutbox();
         this.emit("_registered", { type: "registered", sessionId: brokerMessage.sessionId });
         break;
       }
@@ -773,6 +1179,48 @@ var IntercomClient = class extends EventEmitter {
           throw new Error("Invalid message event");
         }
         this.emit("message", from, message, deliveryId);
+        break;
+      }
+      case "boss_control": {
+        const { deliveryId, from } = brokerMessage;
+        if (typeof deliveryId !== "string" || !isSessionInfo(from)) {
+          throw new Error("Invalid boss_control event");
+        }
+        const envelope = bossControlKind(brokerMessage.envelope).envelope;
+        const source = from.boss === void 0 ? void 0 : parseBossParticipantBindingMetadata(from.boss, from.id).binding;
+        if (source === void 0 || source.state !== "active" || source.bossRunId !== envelope.bossRunId || source.participantId !== envelope.participantId || source.bindingEpoch !== envelope.bindingEpoch) throw new Error("Boss control event sender does not match its broker-owned binding");
+        this.emit("boss_control", from, envelope, deliveryId);
+        break;
+      }
+      case "boss_control_result": {
+        const result = parseBossControlResult(brokerMessage);
+        const { requestId, messageId, idempotencyKey, deliveryId } = result;
+        const stored = this.bossControlOutbox?.find(idempotencyKey);
+        if (!stored || stored.envelope.messageId !== requestId) throw new Error("Boss control result does not match the durable outbox binding");
+        const pending = this.pendingBossControls.get(requestId);
+        if (pending && (pending.messageId !== messageId || pending.idempotencyKey !== idempotencyKey)) {
+          throw new Error("Boss control result correlation does not match the pending request");
+        }
+        this.bossControlOutbox.removeCorrelated(idempotencyKey, messageId, deliveryId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pendingBossControls.delete(requestId);
+          pending.resolve(result);
+        }
+        break;
+      }
+      case "boss_control_ack": {
+        const { requestId, messageId, idempotencyKey, deliveryId } = parseBossControlAck(brokerMessage);
+        const pending = this.pendingBossControls.get(requestId);
+        if (pending && (pending.messageId !== messageId || pending.idempotencyKey !== idempotencyKey)) {
+          throw new Error("Boss control acknowledgement correlation does not match the pending request");
+        }
+        const transition = this.bossControlOutbox?.markAccepted(idempotencyKey, messageId, deliveryId);
+        if (transition === void 0) throw new Error("Boss control acknowledgement has no durable outbox");
+        if (pending?.deliveryId !== void 0 && pending.deliveryId !== deliveryId) {
+          throw new Error("Boss control acknowledgement changed the pending deliveryId");
+        }
+        if (pending) pending.deliveryId = deliveryId;
         break;
       }
       case "delivery_accepted": {
@@ -1025,6 +1473,64 @@ var IntercomClient = class extends EventEmitter {
       }
     });
   }
+  sendBossControl(to, envelopeValue) {
+    let socket;
+    try {
+      socket = this.requireActiveSocket();
+    } catch (error2) {
+      return Promise.reject(toError(error2));
+    }
+    let envelope;
+    try {
+      envelope = bossControlKind(envelopeValue).envelope;
+      const binding = this._bossBinding?.binding;
+      if (binding === void 0 || binding.state !== "active" || envelope.bossRunId !== binding.bossRunId || envelope.participantId !== binding.participantId || envelope.bindingEpoch !== binding.bindingEpoch) throw new Error("Boss control envelope does not match this client's active participant binding");
+    } catch (error2) {
+      return Promise.reject(toError(error2));
+    }
+    const requestId = envelope.messageId;
+    if (this.pendingBossControls.has(requestId)) {
+      return Promise.resolve({
+        requestId,
+        messageId: envelope.messageId,
+        idempotencyKey: envelope.idempotencyKey,
+        status: "rejected",
+        delivered: false,
+        code: "INVALID_CONTROL",
+        reason: "Boss requestId is already pending"
+      });
+    }
+    try {
+      if (!this.bossControlOutbox) throw new Error("Durable Boss control outbox is unavailable");
+      this.bossControlOutbox.enqueue(to, envelope);
+    } catch (error2) {
+      return Promise.reject(toError(error2));
+    }
+    return new Promise((resolve3, reject) => {
+      const timeout = setTimeout(() => {
+        if (!this.pendingBossControls.delete(requestId)) return;
+        reject(new Error("Boss control delivery timeout"));
+      }, 1e4);
+      timeout.unref?.();
+      this.pendingBossControls.set(requestId, {
+        messageId: envelope.messageId,
+        idempotencyKey: envelope.idempotencyKey,
+        resolve: resolve3,
+        reject,
+        timeout
+      });
+      try {
+        writeMessage(socket, { type: "boss_control", requestId, to, envelope });
+      } catch (error2) {
+        clearTimeout(timeout);
+        this.pendingBossControls.delete(requestId);
+        reject(toError(error2));
+      }
+    });
+  }
+  acknowledgeBossControl(deliveryId, messageId, idempotencyKey) {
+    return this.writeControlMessage({ type: "boss_control_received", deliveryId, messageId, idempotencyKey });
+  }
   acknowledgeMessage(deliveryId) {
     return this.writeControlMessage({ type: "message_received", deliveryId });
   }
@@ -1080,6 +1586,22 @@ var IntercomClient = class extends EventEmitter {
       }
     }
   }
+  replayBossControlOutbox() {
+    const socket = this.socket;
+    if (!socket || socket.destroyed || !this._sessionId || !this.bossControlOutbox) return;
+    for (const entry of this.bossControlOutbox.list()) {
+      try {
+        writeMessage(socket, {
+          type: "boss_control",
+          requestId: entry.envelope.messageId,
+          to: entry.to,
+          envelope: entry.envelope
+        });
+      } catch {
+        return;
+      }
+    }
+  }
   updatePresence(updates) {
     if (this.disconnecting) {
       return;
@@ -1094,38 +1616,39 @@ var IntercomClient = class extends EventEmitter {
 
 // broker/spawn.ts
 import { spawn } from "child_process";
-import { existsSync as existsSync2, readFileSync as readFileSync4, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
-import { join as join3, dirname as dirname2 } from "path";
+import { existsSync as existsSync3, readFileSync as readFileSync5, unlinkSync, writeFileSync as writeFileSync2 } from "fs";
+import { join as join4, dirname as dirname2 } from "path";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import net2 from "net";
 import { randomUUID as randomUUID3 } from "crypto";
+import { POLICY_SEMANTICS_HASH as POLICY_SEMANTICS_HASH2, POLICY_SEMANTICS_VERSION as POLICY_SEMANTICS_VERSION2 } from "@dataforxyz/agent-intercom-core";
 var INTERCOM_DIR = getIntercomDirPath();
-var EXTENSION_DIR = join3(dirname2(fileURLToPath(import.meta.url)), "..");
-var BROKER_PID = join3(INTERCOM_DIR, "broker.pid");
-var BROKER_SPAWN_LOCK = join3(INTERCOM_DIR, "broker.spawn.lock");
+var EXTENSION_DIR = join4(dirname2(fileURLToPath(import.meta.url)), "..");
+var BROKER_PID = join4(INTERCOM_DIR, "broker.pid");
+var BROKER_SPAWN_LOCK = join4(INTERCOM_DIR, "broker.spawn.lock");
 function sleep(ms) {
   return new Promise((resolve3) => setTimeout(resolve3, ms));
 }
 function getBrokerEntryPath(moduleUrl = import.meta.url) {
   const moduleDir = dirname2(fileURLToPath(moduleUrl));
-  const bundledBroker = join3(moduleDir, "broker.mjs");
-  return existsSync2(bundledBroker) ? bundledBroker : join3(moduleDir, "broker.ts");
+  const bundledBroker = join4(moduleDir, "broker.mjs");
+  return existsSync3(bundledBroker) ? bundledBroker : join4(moduleDir, "broker.ts");
 }
 function getTsxCliPath(extensionDir = EXTENSION_DIR) {
   try {
     const requireFromExtension = createRequire(import.meta.url);
     const tsxMain = requireFromExtension.resolve("tsx");
-    return join3(dirname2(tsxMain), "cli.mjs");
+    return join4(dirname2(tsxMain), "cli.mjs");
   } catch {
-    return join3(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
+    return join4(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
   }
 }
 function quoteWindowsArg(value) {
   return `"${value.replace(/"/g, '""')}"`;
 }
 function getWindowsHiddenLauncherPath(intercomDir = INTERCOM_DIR) {
-  return join3(intercomDir, "broker-launch.vbs");
+  return join4(intercomDir, "broker-launch.vbs");
 }
 function usesDefaultBrokerCommand(brokerCommand, brokerArgs) {
   return brokerCommand === "npx" && brokerArgs.length === 2 && brokerArgs[0] === "--no-install" && brokerArgs[1] === "tsx";
@@ -1153,7 +1676,7 @@ function isBrokerHealthOkMessage(message, requestId) {
   const remoteAccess = response.remoteAccess;
   if (typeof remoteAccess !== "object" || remoteAccess === null || Array.isArray(remoteAccess)) return false;
   const contract = remoteAccess;
-  return contract.feature === "remote-access-v1" && contract.policySemanticsVersion === POLICY_SEMANTICS_VERSION && contract.policySemanticsHash === POLICY_SEMANTICS_HASH;
+  return contract.feature === "remote-access-v1" && contract.policySemanticsVersion === POLICY_SEMANTICS_VERSION2 && contract.policySemanticsHash === POLICY_SEMANTICS_HASH2;
 }
 function writeWindowsHiddenLauncher(commandLine, launcherPath = getWindowsHiddenLauncherPath()) {
   ensureIntercomRuntimeDir(dirname2(launcherPath));
@@ -1259,10 +1782,10 @@ async function spawnBrokerIfNeeded(brokerCommand, brokerArgs) {
   }
 }
 async function stopBrokerProcess(pidFile = BROKER_PID, timeoutMs = 3e3) {
-  if (!existsSync2(pidFile)) return;
+  if (!existsSync3(pidFile)) return;
   let pid;
   try {
-    pid = Number.parseInt(readFileSync4(pidFile, "utf-8").trim(), 10);
+    pid = Number.parseInt(readFileSync5(pidFile, "utf-8").trim(), 10);
   } catch {
     return;
   }
@@ -1287,9 +1810,9 @@ async function isBrokerRunning() {
   if (await checkSocketConnectable()) {
     return true;
   }
-  if (!existsSync2(BROKER_PID)) return false;
+  if (!existsSync3(BROKER_PID)) return false;
   try {
-    const pid = parseInt(readFileSync4(BROKER_PID, "utf-8").trim(), 10);
+    const pid = parseInt(readFileSync5(BROKER_PID, "utf-8").trim(), 10);
     if (!Number.isFinite(pid)) return false;
     process.kill(pid, 0);
     return checkSocketConnectable();
@@ -1386,11 +1909,11 @@ ${Date.now()}
   return false;
 }
 function isSpawnLockStale() {
-  if (!existsSync2(BROKER_SPAWN_LOCK)) {
+  if (!existsSync3(BROKER_SPAWN_LOCK)) {
     return false;
   }
   try {
-    const [pidLine = "", createdAtLine = "0"] = readFileSync4(BROKER_SPAWN_LOCK, "utf-8").trim().split("\n");
+    const [pidLine = "", createdAtLine = "0"] = readFileSync5(BROKER_SPAWN_LOCK, "utf-8").trim().split("\n");
     const pid = Number.parseInt(pidLine, 10);
     const createdAt = Number.parseInt(createdAtLine, 10);
     const ageMs = Date.now() - createdAt;
@@ -1424,8 +1947,8 @@ async function waitForBroker(timeoutMs = 5e3) {
 }
 
 // config.ts
-import { existsSync as existsSync3, readFileSync as readFileSync5 } from "fs";
-import { join as join4, resolve as resolve2 } from "path";
+import { existsSync as existsSync4, readFileSync as readFileSync6 } from "fs";
+import { join as join5, resolve as resolve2 } from "path";
 import { homedir as homedir2 } from "os";
 var DEFAULT_ASK_TIMEOUT_MS = 45 * 1e3;
 var MAX_ASK_TIMEOUT_MS = 120 * 1e3;
@@ -1447,8 +1970,8 @@ function getAskTimeoutMs() {
   return validateAskTimeoutMs(value, "PI_INTERCOM_ASK_TIMEOUT_MS");
 }
 function getConfigPath() {
-  const agentDir = process.env.PI_CODING_AGENT_DIR ? resolve2(process.env.PI_CODING_AGENT_DIR) : join4(homedir2(), ".pi", "agent");
-  return join4(agentDir, "intercom", "config.json");
+  const agentDir = process.env.PI_CODING_AGENT_DIR ? resolve2(process.env.PI_CODING_AGENT_DIR) : join5(homedir2(), ".pi", "agent");
+  return join5(agentDir, "intercom", "config.json");
 }
 var defaults = {
   brokerCommand: "npx",
@@ -1465,11 +1988,11 @@ var defaults = {
 };
 function loadConfig() {
   const configPath = getConfigPath();
-  if (!existsSync3(configPath)) {
+  if (!existsSync4(configPath)) {
     return { ...defaults };
   }
   try {
-    const raw = readFileSync5(configPath, "utf-8");
+    const raw = readFileSync6(configPath, "utf-8");
     const parsed = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
       throw new Error("Config must be a JSON object");
@@ -1563,39 +2086,126 @@ function loadConfig() {
 
 // codex/team.ts
 import { readFile } from "node:fs/promises";
-import { join as join5 } from "node:path";
-var LIVE_STATES = /* @__PURE__ */ new Set(["provisioning", "running", "idle", "needs_attention", "stopping"]);
+import { join as join6 } from "node:path";
+import {
+  BOSS_PARTICIPANT_ROLES,
+  parseParticipantState as parseParticipantState2,
+  parseWorkerIdentityV2 as parseWorkerIdentityV22,
+  workerIdentityFromEnvironment
+} from "@dataforxyz/agent-intercom-core/boss";
+var LEGACY_LIVE_STATES = /* @__PURE__ */ new Set(["provisioning", "running", "idle", "needs_attention", "stopping"]);
+var CANONICAL_LIVE_STATES = /* @__PURE__ */ new Set(["provisioning", "registering", "ready", "working", "waiting", "paused", "stalled", "blocked", "unreachable"]);
 var stringValue = (value) => typeof value === "string" && value.trim() ? value.trim() : void 0;
 var connectedTo = (sessions, target) => {
   const normalized = target.toLowerCase();
   return sessions.some((session) => session.id === target || session.name?.toLowerCase() === normalized);
 };
+function bossIdentityFromEnvironment(env) {
+  const bossKeys = ["AGENT_INTERCOM_BOSS_RUN_ID", "AGENT_INTERCOM_PARTICIPANT_ID", "AGENT_INTERCOM_BINDING_EPOCH"];
+  if (!bossKeys.some((key) => env[key] !== void 0)) return void 0;
+  const identity = workerIdentityFromEnvironment(env);
+  if (!("bossRunId" in identity)) throw new Error("Incomplete Boss worker identity cannot discover a team");
+  return identity;
+}
+function canonicalWorker(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("worker must be an object");
+  const worker = value;
+  const identity = parseWorkerIdentityV22({
+    version: "orc.worker-identity.v2",
+    workerId: worker.id,
+    workerIncarnationId: worker.workerIncarnationId,
+    workerGeneration: worker.workerGeneration,
+    ...worker.bossRunId === void 0 ? {} : { bossRunId: worker.bossRunId },
+    ...worker.participantId === void 0 ? {} : { participantId: worker.participantId },
+    ...worker.bindingEpoch === void 0 ? {} : { bindingEpoch: worker.bindingEpoch }
+  });
+  parseParticipantState2(worker.state, "$.worker.state");
+  if (typeof worker.role !== "string" || !BOSS_PARTICIPANT_ROLES.includes(worker.role)) {
+    throw new Error("worker role is not canonical");
+  }
+  if (worker.owned !== true || !stringValue(worker.managerSessionId) || !stringValue(worker.intercomTarget)) {
+    throw new Error("canonical worker ownership routing is incomplete");
+  }
+  return { ...worker, canonicalIdentity: identity };
+}
+function exactBossRosterSession(sessions, worker) {
+  const identity = worker.canonicalIdentity;
+  const target = stringValue(worker.intercomTarget);
+  const role = stringValue(worker.role);
+  const state = stringValue(worker.state);
+  if (!identity || !("bossRunId" in identity) || !target || !role || !state) return void 0;
+  const matches = sessions.filter((candidate) => candidate.id === target);
+  if (matches.length !== 1) return void 0;
+  const [session] = matches;
+  if (!session?.boss?.binding || session.boss.workerIdentity === void 0 || session.boss.participantState === void 0) return void 0;
+  try {
+    const sessionIdentity = parseWorkerIdentityV22(session.boss.workerIdentity);
+    const sessionState = parseParticipantState2(session.boss.participantState, "$.session.boss.participantState");
+    const binding = session.boss.binding;
+    return "bossRunId" in sessionIdentity && session.id === target && binding.sessionId === session.id && binding.state === "active" && binding.bossRunId === identity.bossRunId && binding.participantId === identity.participantId && binding.bindingEpoch === identity.bindingEpoch && binding.role === role && sessionIdentity.workerId === identity.workerId && sessionIdentity.workerIncarnationId === identity.workerIncarnationId && sessionIdentity.workerGeneration === identity.workerGeneration && sessionIdentity.bossRunId === identity.bossRunId && sessionIdentity.participantId === identity.participantId && sessionIdentity.bindingEpoch === identity.bindingEpoch && sessionState === state ? session : void 0;
+  } catch {
+    return void 0;
+  }
+}
 async function readWorkers(agentDir) {
   try {
-    const parsed = JSON.parse(await readFile(join5(agentDir, "intercom", "orchestrator", "workers.json"), "utf8"));
-    return Array.isArray(parsed.workers) ? parsed.workers : [];
+    const parsed = JSON.parse(await readFile(join6(agentDir, "intercom", "orchestrator", "workers.json"), "utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("worker snapshot must be an object");
+    const snapshot = parsed;
+    if (snapshot.version !== 1 && snapshot.version !== 2 || !Array.isArray(snapshot.workers)) throw new Error("unsupported worker snapshot version");
+    if (snapshot.version === 1) return { version: 1, workers: snapshot.workers };
+    return { version: 2, workers: snapshot.workers.map(canonicalWorker) };
   } catch {
-    return [];
+    return { version: 1, workers: [] };
   }
 }
 async function resolveIntercomTeam(input) {
   const env = input.env ?? process.env;
-  const workers = await readWorkers(input.agentDir ?? getAgentDirPath());
+  const snapshot = await readWorkers(input.agentDir ?? getAgentDirPath());
+  const workers = snapshot.workers;
   const workerId = stringValue(env.AGENT_INTERCOM_WORKER_ID);
+  const bossIdentity = bossIdentityFromEnvironment(env);
   const runId = stringValue(env.AGENT_INTERCOM_RUN_ID);
-  const current = workerId ? workers.find((worker) => stringValue(worker.id) === workerId && (!runId || stringValue(worker.runId) === runId)) : void 0;
-  const managerTarget = stringValue(current?.managerSessionId) ?? stringValue(env.AGENT_INTERCOM_MANAGER_TARGET) ?? stringValue(env.AGENT_INTERCOM_MANAGER_SESSION_ID);
+  const currentMatches = workerId ? workers.filter((worker) => stringValue(worker.id) === workerId && (bossIdentity === void 0 ? !runId || stringValue(worker.runId) === runId : snapshot.version === 2 && worker.canonicalIdentity?.workerId === bossIdentity.workerId && worker.canonicalIdentity.workerIncarnationId === bossIdentity.workerIncarnationId && worker.canonicalIdentity.workerGeneration === bossIdentity.workerGeneration && "bossRunId" in worker.canonicalIdentity && "bossRunId" in bossIdentity && worker.canonicalIdentity.bossRunId === bossIdentity.bossRunId && worker.canonicalIdentity.participantId === bossIdentity.participantId && worker.canonicalIdentity.bindingEpoch === bossIdentity.bindingEpoch)) : [];
+  const current = bossIdentity === void 0 ? currentMatches[0] : currentMatches.length === 1 ? currentMatches[0] : void 0;
+  const currentTarget = stringValue(current?.intercomTarget);
+  const exactCurrentProjection = current !== void 0 && currentTarget === input.selfId && workers.filter((worker) => stringValue(worker.id) === workerId).length === 1 && workers.filter((worker) => stringValue(worker.intercomTarget) === currentTarget).length === 1 && exactBossRosterSession(input.sessions, current) !== void 0;
+  if (bossIdentity !== void 0 && !exactCurrentProjection) {
+    return { self: { id: input.selfId, ...workerId ? { workerId } : {}, isManager: false }, coworkers: [] };
+  }
+  const managerTarget = stringValue(current?.managerSessionId) ?? (bossIdentity === void 0 ? stringValue(env.AGENT_INTERCOM_MANAGER_TARGET) ?? stringValue(env.AGENT_INTERCOM_MANAGER_SESSION_ID) : void 0);
   const teamId = managerTarget ?? input.selfId;
-  const coworkers = workers.filter((worker) => worker.owned === true).filter((worker) => stringValue(worker.managerSessionId) === teamId).filter((worker) => LIVE_STATES.has(stringValue(worker.state) ?? "")).filter((worker) => stringValue(worker.id) !== workerId).map((worker) => {
+  const currentRole = stringValue(current?.role);
+  const canDiscoverOwnedRoster = bossIdentity === void 0 || currentRole === "manager" || currentRole === "controller";
+  const coworkers = (canDiscoverOwnedRoster ? workers : []).filter((worker) => worker.owned === true).filter((worker) => bossIdentity === void 0 || snapshot.version === 2 && worker.canonicalIdentity !== void 0 && "bossRunId" in worker.canonicalIdentity && "bossRunId" in bossIdentity && worker.canonicalIdentity.bossRunId === bossIdentity.bossRunId).filter((worker) => stringValue(worker.managerSessionId) === teamId).filter((worker) => stringValue(worker.intercomTarget) !== managerTarget).filter((worker) => (snapshot.version === 2 ? CANONICAL_LIVE_STATES : LEGACY_LIVE_STATES).has(stringValue(worker.state) ?? "")).filter((worker) => stringValue(worker.id) !== workerId).map((worker) => {
     const id = stringValue(worker.id);
     if (!id) return void 0;
     const target = stringValue(worker.intercomTarget) ?? id;
-    return { id, target, ...stringValue(worker.harness) ? { harness: stringValue(worker.harness) } : {}, ...stringValue(worker.role) ? { role: stringValue(worker.role) } : {}, ...stringValue(worker.state) ? { state: stringValue(worker.state) } : {}, connected: connectedTo(input.sessions, target) };
+    const connected = bossIdentity === void 0 ? connectedTo(input.sessions, target) : exactBossRosterSession(input.sessions, worker) !== void 0;
+    if (!connected) return void 0;
+    return {
+      id,
+      target,
+      ...stringValue(worker.harness) ? { harness: stringValue(worker.harness) } : {},
+      ...stringValue(worker.role) ? { role: stringValue(worker.role) } : {},
+      ...stringValue(worker.state) ? { state: stringValue(worker.state) } : {},
+      connected
+    };
   }).filter((member) => Boolean(member));
-  return { teamId, self: { id: input.selfId, ...workerId ? { workerId } : {}, isManager: !managerTarget }, manager: managerTarget ? { target: managerTarget, connected: connectedTo(input.sessions, managerTarget) } : { target: input.selfId, connected: true }, coworkers };
+  const managerWorker = managerTarget === void 0 ? void 0 : workers.find((worker) => stringValue(worker.intercomTarget) === managerTarget && (bossIdentity === void 0 || snapshot.version === 2 && stringValue(worker.role) === "manager" && worker.canonicalIdentity !== void 0 && "bossRunId" in worker.canonicalIdentity && "bossRunId" in bossIdentity && worker.canonicalIdentity.bossRunId === bossIdentity.bossRunId));
+  const managerConnected = managerTarget === void 0 ? true : bossIdentity === void 0 ? connectedTo(input.sessions, managerTarget) : managerWorker !== void 0 && exactBossRosterSession(input.sessions, managerWorker) !== void 0;
+  return {
+    teamId,
+    self: { id: input.selfId, ...workerId ? { workerId } : {}, isManager: bossIdentity === void 0 && !managerTarget },
+    ...managerTarget ? { manager: { target: managerTarget, connected: managerConnected } } : bossIdentity === void 0 ? { manager: { target: input.selfId, connected: true } } : {},
+    coworkers
+  };
 }
 function formatIntercomTeam(team) {
-  const lines = [`Manager: ${team.manager ? `${team.manager.target} [${team.manager.connected ? "connected" : "not connected"}]` : "unknown"}`, `You: ${team.self.workerId ?? team.self.id}${team.self.isManager ? " [manager]" : ""}`];
+  const lines = [
+    `Manager: ${team.manager ? `${team.manager.target} [${team.manager.connected ? "connected" : "not connected"}]` : "unknown"}`,
+    `You: ${team.self.workerId ?? team.self.id}${team.self.isManager ? " [manager]" : ""}`
+  ];
   if (!team.coworkers.length) lines.push("Coworkers: none");
   else {
     lines.push("Coworkers:");
@@ -1653,7 +2263,7 @@ function publicPendingEntry(entry, selector) {
   };
 }
 function shortHash(value) {
-  return createHash2("sha256").update(value).digest("hex").slice(0, 8);
+  return createHash3("sha256").update(value).digest("hex").slice(0, 8);
 }
 function buildCodexRuntimeIdentity(env = process.env, cwd = env.PWD || processCwd(), pid = process.pid) {
   const sessionId = env.CODEX_INTERCOM_SESSION_ID?.trim() || env.CODEX_PEER_ID?.trim() || `codex-${pid}-${shortHash(cwd)}`;
@@ -1924,12 +2534,12 @@ Pending asks: ${this.unresolvedAsks.size}`,
       }
     );
   }
-  async list(scope = "machine", includeSelf = false) {
+  async list(scope2 = "machine", includeSelf = false) {
     const client = await this.connect();
     let sessions = await client.listSessions();
-    if (scope === "directory") {
+    if (scope2 === "directory") {
       sessions = sessions.filter((session) => session.cwd === this.identity.cwd);
-    } else if (scope === "repo") {
+    } else if (scope2 === "repo") {
       const currentRoot = detectGitRoot(this.identity.cwd);
       sessions = currentRoot ? sessions.filter((session) => detectGitRoot(session.cwd) === currentRoot) : [];
     }

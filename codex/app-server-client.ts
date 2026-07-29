@@ -4,6 +4,7 @@ import { randomBytes, createHash } from "node:crypto";
 import net from "node:net";
 import readline from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
+import { assertHardenedBossProviderAuthority, type HardenedBossClientKind } from "./boss-client.ts";
 
 export interface JsonRpcMessage {
   id?: string | number | null;
@@ -23,6 +24,7 @@ export interface CodexAppServerClientOptions {
   startDaemonCommand?: string;
   startDaemonArgs?: string[];
   requestTimeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
 }
 
 interface PendingRequest {
@@ -76,8 +78,11 @@ export class CodexAppServerClient extends EventEmitter {
   private initialized = false;
   private options: Required<CodexAppServerClientOptions>;
 
-  constructor(options: CodexAppServerClientOptions = {}) {
+  constructor(options: CodexAppServerClientOptions = {}, protectedBossClient?: HardenedBossClientKind) {
     super();
+    // Keep the provider ceiling at the lowest shared process boundary too.
+    // The second argument is deny-only: it cannot convey provider authority.
+    assertHardenedBossProviderAuthority(protectedBossClient);
     this.options = {
       command: options.command ?? "codex",
       args: options.args ?? ["app-server"],
@@ -88,6 +93,7 @@ export class CodexAppServerClient extends EventEmitter {
       startDaemonCommand: options.startDaemonCommand ?? "codex",
       startDaemonArgs: options.startDaemonArgs ?? ["app-server", "daemon", "start"],
       requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      env: options.env ?? process.env,
     };
   }
 
@@ -101,6 +107,7 @@ export class CodexAppServerClient extends EventEmitter {
     if (this.options.startDaemon) {
       const started = spawnSync(this.options.startDaemonCommand, this.options.startDaemonArgs, {
         encoding: "utf8",
+        env: this.options.env,
         stdio: ["ignore", "pipe", "pipe"],
       });
       if (started.status !== 0) {
@@ -116,7 +123,7 @@ export class CodexAppServerClient extends EventEmitter {
 
     const proc = spawn(this.options.command, this.options.args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      env: this.options.env,
     });
     this.proc = proc;
     this.rl = readline.createInterface({ input: proc.stdout, crlfDelay: Infinity });

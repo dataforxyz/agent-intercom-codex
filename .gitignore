@@ -4,5 +4,4 @@ dist/*
 !dist/build-info.json
 *.log
 .DS_Store
-package-lock.json
 progress.md

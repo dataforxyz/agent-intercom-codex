@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildCodexAppServerArgs, buildCoiTuiArgs, cleanupOldCoiStateFiles, createDefaultIdentity, deriveBridgeAgentRuntimeConfig, hasCodexHelpOrVersion, parseCoiArgs, resetCoiStateForFreshStart, resolveCoiResumeRequest, sanitizeSegment, splitCodexResumeArgs } from "./coi.ts";
+import { assertHardenedBossCoiLaunch, buildCodexAppServerArgs, buildCoiTuiArgs, cleanupOldCoiStateFiles, createDefaultIdentity, deriveBridgeAgentRuntimeConfig, hasCodexHelpOrVersion, parseCoiArgs, resetCoiStateForFreshStart, resolveCoiResumeRequest, runCoi, runInteractiveTui, sanitizeSegment, splitCodexResumeArgs } from "./coi.ts";
 import { filterAltIInput, TuiInputDecoder } from "./tui-input.ts";
 
 test("sanitizeSegment keeps readable safe ids", () => {
@@ -46,7 +46,7 @@ test("parseCoiArgs leaves everything after separator for codex", () => {
   ], {});
 
   assert.equal(parsed.name, "sidecar");
-  assert.deepEqual(parsed.codexArgs, ["--name", "not-sidecar"]);
+  assert.deepEqual(parsed.codexArgs, ["--", "--name", "not-sidecar"]);
 });
 
 test("parseCoiArgs supports disabling the Alt+I terminal shortcut", () => {
@@ -59,6 +59,7 @@ test("splitCodexResumeArgs keeps options before the resumed thread id", () => {
   assert.deepEqual(splitCodexResumeArgs(["--profile", "cliproxy", "-m", "gpt-test", "hello there"]), {
     optionArgs: ["--profile", "cliproxy", "-m", "gpt-test"],
     promptArgs: ["hello there"],
+    separatorPresent: false,
   });
 });
 
@@ -66,6 +67,14 @@ test("splitCodexResumeArgs respects explicit separator", () => {
   assert.deepEqual(splitCodexResumeArgs(["--no-alt-screen", "--", "--literal-prompt"]), {
     optionArgs: ["--no-alt-screen"],
     promptArgs: ["--literal-prompt"],
+    separatorPresent: true,
+  });
+});
+
+test("explicit separator prevents a literal resume prompt from becoming a TUI subcommand", () => {
+  assert.deepEqual(resolveCoiResumeRequest(["--", "resume", "attacker-thread"]), {
+    optionArgs: [],
+    promptArgs: ["resume", "attacker-thread"],
   });
 });
 
@@ -82,8 +91,16 @@ test("buildCoiTuiArgs opens a fresh remote TUI without resuming an empty sidecar
     "--remote", "unix:///tmp/coi.sock", "--profile", "work",
   ]);
   assert.deepEqual(buildCoiTuiArgs("unix:///tmp/coi.sock", [], "thread-requested", ["continue"], true), [
-    "resume", "--remote", "unix:///tmp/coi.sock", "thread-requested", "continue",
+    "resume", "--remote", "unix:///tmp/coi.sock", "thread-requested", "--", "continue",
   ]);
+});
+
+test("TUI reconstruction preserves separator so prompt-shaped options cannot be promoted", () => {
+  assert.deepEqual(buildCoiTuiArgs("unix:///tmp/coi.sock", ["--no-alt-screen"], "thread-1", ["--literal-prompt"], false), [
+    "--remote", "unix:///tmp/coi.sock", "--no-alt-screen", "--", "--literal-prompt",
+  ]);
+  assert.equal(hasCodexHelpOrVersion(["--", "--help"]), false);
+  assert.deepEqual(deriveBridgeAgentRuntimeConfig(["--", "--yolo"], "/tmp/project"), {});
 });
 
 test("buildCodexAppServerArgs forwards only app-server-compatible config options", () => {
@@ -118,6 +135,29 @@ test("buildCodexAppServerArgs forwards managed worker identity to the MCP subpro
       "-c", 'mcp_servers.codex-intercom.env.AGENT_INTERCOM_RUN_ID="run-1"',
       "-c", 'mcp_servers.codex-intercom.env.AGENT_INTERCOM_MANAGER_TARGET="manager-1"',
       "-c", 'mcp_servers.codex-intercom.env.AGENT_INTERCOM_OWNED="1"',
+      "--listen", "unix:///tmp/coi.sock",
+    ],
+  );
+});
+
+test("buildCodexAppServerArgs forwards canonical Boss identity without deriving it from legacy runId", () => {
+  assert.deepEqual(
+    buildCodexAppServerArgs([], "/tmp/coi.sock", {
+      AGENT_INTERCOM_WORKER_ID: "worker-1",
+      AGENT_INTERCOM_WORKER_INCARNATION_ID: "incarnation-1",
+      AGENT_INTERCOM_WORKER_GENERATION: "2",
+      AGENT_INTERCOM_BOSS_RUN_ID: "boss-run-1",
+      AGENT_INTERCOM_PARTICIPANT_ID: "participant-1",
+      AGENT_INTERCOM_BINDING_EPOCH: "3",
+    }),
+    [
+      "app-server",
+      "-c", 'mcp_servers.codex-intercom.env.AGENT_INTERCOM_WORKER_ID="worker-1"',
+      "-c", 'mcp_servers.codex-intercom.env.AGENT_INTERCOM_WORKER_INCARNATION_ID="incarnation-1"',
+      "-c", 'mcp_servers.codex-intercom.env.AGENT_INTERCOM_WORKER_GENERATION="2"',
+      "-c", 'mcp_servers.codex-intercom.env.AGENT_INTERCOM_BOSS_RUN_ID="boss-run-1"',
+      "-c", 'mcp_servers.codex-intercom.env.AGENT_INTERCOM_PARTICIPANT_ID="participant-1"',
+      "-c", 'mcp_servers.codex-intercom.env.AGENT_INTERCOM_BINDING_EPOCH="3"',
       "--listen", "unix:///tmp/coi.sock",
     ],
   );
@@ -235,6 +275,10 @@ test("deriveBridgeAgentRuntimeConfig carries workspace-write sandbox roots", () 
   });
 });
 
+test("deriveBridgeAgentRuntimeConfig preserves omitted safe defaults", () => {
+  assert.deepEqual(deriveBridgeAgentRuntimeConfig([], "/tmp/project"), {});
+});
+
 test("deriveBridgeAgentRuntimeConfig supports short and bypass flags", () => {
   assert.deepEqual(deriveBridgeAgentRuntimeConfig(["-s=read-only", "-a", "never"], "/tmp/project"), {
     approvalPolicy: "never",
@@ -245,6 +289,144 @@ test("deriveBridgeAgentRuntimeConfig supports short and bypass flags", () => {
     approvalPolicy: "never",
     sandboxPolicy: { type: "dangerFullAccess" },
   });
+});
+
+test("hardened Boss launch rejects raw config, profiles, bypass aliases, and root expansion", () => {
+  for (const args of [
+    ["-c", "sandbox_mode=\"danger-full-access\""],
+    ["--config=sandbox_mode=\"danger-full-access\""],
+    ["-csandbox_mode=\"danger-full-access\""],
+    ["-p", "unsafe-profile"],
+    ["-punsafe-profile"],
+    ["--profile=unsafe-profile"],
+    ["--enable", "untrusted-feature"],
+    ["--disable=approval_checks"],
+    ["--dangerously-bypass-approvals-and-sandbox"],
+    ["--dangerously-bypass-hook-trust"],
+    ["--yolo"],
+    ["--add-dir", "/tmp/outside"],
+    ["-C", "/tmp/outside"],
+  ]) {
+    assert.throws(() => assertHardenedBossCoiLaunch(args, "/tmp/project", "boss_participant"));
+  }
+  for (const override of ["--yolo", "--config=unsafe", "--profile=unsafe", "--enable=escape", "--add-dir=/tmp/outside", "--sandbox=danger-full-access", "--ask-for-approval=never"]) {
+    assert.throws(() => assertHardenedBossCoiLaunch(["--", override], "/tmp/project", "boss_participant"));
+  }
+});
+
+test("hardened Boss launch rejects attached short authority options before TUI and refresh spawn", () => {
+  for (const [arg, expected] of [
+    ["-sworkspace-write", /attached -s policy override/],
+    ["-anever", /attached -a policy override/],
+    ["-C\/etc", /writable root/],
+  ] as const) {
+    for (const argv of [[arg], ["--", arg]]) {
+      assert.throws(
+        () => assertHardenedBossCoiLaunch(argv, "/tmp/project", "boss_reviewer"),
+        expected,
+        `must reject ${arg} in ${argv.join(" ")}`,
+      );
+    }
+  }
+
+  assert.deepEqual(assertHardenedBossCoiLaunch([], "/tmp/project", "boss_reviewer"), {});
+  assert.deepEqual(
+    assertHardenedBossCoiLaunch(["-s", "read-only", "-a", "untrusted"], "/tmp/project", "boss_reviewer"),
+    { approvalPolicy: "untrusted", sandboxPolicy: { type: "readOnly", networkAccess: false } },
+  );
+  assert.deepEqual(assertHardenedBossCoiLaunch(["-sworkspace-write", "-anever", "-C/etc"], "/tmp/project", undefined), {});
+});
+
+test("hardened Boss validation is proxy-first and zero-trap for raw argv", () => {
+  let trapCount = 0;
+  const proxy = new Proxy([], {
+    get() { trapCount += 1; throw new Error("trap"); },
+    ownKeys() { trapCount += 1; throw new Error("trap"); },
+    getOwnPropertyDescriptor() { trapCount += 1; throw new Error("trap"); },
+    getPrototypeOf() { trapCount += 1; throw new Error("trap"); },
+  });
+  assert.throws(() => assertHardenedBossCoiLaunch(proxy, "/tmp/project", "boss_participant"), /proxies are not supported/);
+  assert.equal(trapCount, 0);
+});
+
+test("Boss production launch fails provider authority before help, args, or caller command inspection", async () => {
+  const base = {
+    cwd: "/tmp/project",
+    noTui: true,
+    copyShortcut: false,
+    codexCommand: "codex",
+    codexArgs: ["--help", "--yolo"],
+  };
+  for (const options of [base, { ...base, codexCommand: "/attacker/codex", codexArgs: ["--help"] }]) {
+    await assert.rejects(
+      runCoi(options, { CODEX_INTERCOM_BOSS_CLIENT: "boss_participant" }),
+      (error: unknown) => (error as { code?: unknown }).code === "PROVIDER_AUTHORITY_UNAVAILABLE",
+    );
+  }
+});
+
+test("hostile PATH Codex is never executed by protected coi headless, help, TUI, or refresh", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-provider-coi-"));
+  const marker = join(dir, "executed");
+  const executable = join(dir, "codex");
+  writeFileSync(executable, `#!/bin/sh\nprintf hostile > '${marker}'\n`);
+  chmodSync(executable, 0o755);
+  const hostileEnv = { ...process.env, PATH: dir, CODEX_INTERCOM_BOSS_CLIENT: "boss_reviewer" };
+  const failsUnavailable = (error: unknown) => (error as { code?: unknown }).code === "PROVIDER_AUTHORITY_UNAVAILABLE";
+  try {
+    const base = { cwd: dir, copyShortcut: false, codexCommand: "codex" };
+    await assert.rejects(runCoi({ ...base, noTui: true, codexArgs: [] }, hostileEnv), failsUnavailable);
+    await assert.rejects(runCoi({ ...base, noTui: false, codexArgs: ["--help"] }, hostileEnv), failsUnavailable);
+    await assert.rejects(runCoi({ ...base, noTui: false, codexArgs: [] }, hostileEnv), failsUnavailable);
+    await assert.rejects(
+      runInteractiveTui("codex", ["initial"], ["resume", "thread-1"], dir, undefined, undefined, undefined, "boss_reviewer", hostileEnv),
+      failsUnavailable,
+    );
+    assert.equal(existsSync(marker), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ordinary coi and TUI keep explicit executable launch behavior", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-provider-ordinary-tui-"));
+  const marker = join(dir, "executed");
+  const executable = join(dir, "explicit-codex");
+  writeFileSync(executable, `#!/bin/sh\nprintf ordinary > '${marker}'\n`);
+  chmodSync(executable, 0o755);
+  try {
+    assert.equal(await runCoi({
+      cwd: dir,
+      noTui: false,
+      copyShortcut: false,
+      codexCommand: executable,
+      codexArgs: ["--help"],
+    }, { ...process.env, PATH: dir }), 0);
+    assert.equal(existsSync(marker), true);
+    rmSync(marker);
+    assert.equal(await runInteractiveTui(executable, [], [], dir), 0);
+    assert.equal(existsSync(marker), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("hardened Boss launch preserves read-only reviewers and keeps writable participants dormant without root authority", () => {
+  assert.throws(
+    () => assertHardenedBossCoiLaunch(["--sandbox=workspace-write", "--ask-for-approval=untrusted"], "/tmp/project", "boss_participant"),
+    /broker-owned assigned workspace authority/,
+  );
+  assert.deepEqual(
+    assertHardenedBossCoiLaunch(["--sandbox=read-only", "--ask-for-approval=untrusted"], "/tmp/project", "boss_reviewer"),
+    {
+      approvalPolicy: "untrusted",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+    },
+  );
+  assert.throws(
+    () => assertHardenedBossCoiLaunch(["--sandbox=workspace-write"], "/tmp/project", "boss_reviewer"),
+    /read-only/,
+  );
 });
 
 test("fresh worker startup removes the persisted Codex bridge thread state", () => {

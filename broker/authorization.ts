@@ -1,5 +1,11 @@
-import { authorize, type AuthorizationDecision, type PolicyAction, type PolicyPrincipal, type PolicyState } from "@dataforxyz/agent-intercom-core";
+import { type AuthorizationDecision, type PolicyAction, type PolicyPrincipal, type PolicyState } from "@dataforxyz/agent-intercom-core";
+import type {
+  BossAuthorizationContext,
+  BossPolicyAction,
+  FeatureAwareAuthorizationDecision,
+} from "@dataforxyz/agent-intercom-core/boss";
 import type { SessionInfo } from "../types.ts";
+import { authorizeBossAwareSessionAction } from "./boss-adapter.ts";
 
 export function policyPrincipalForSession(session: SessionInfo): PolicyPrincipal {
   if (session.origin === "remote") {
@@ -35,16 +41,11 @@ export function policyStateForSessions(sessions: Iterable<SessionInfo>): PolicyS
 export function authorizeSessionAction(
   sessions: Iterable<SessionInfo>,
   actorId: string,
-  action: PolicyAction,
+  action: PolicyAction | BossPolicyAction,
   targetId: string,
-): AuthorizationDecision {
-  const state = policyStateForSessions(sessions);
-  const actor = state.principals[actorId];
-  const target = state.principals[targetId];
-  return authorize(state, actorId, action, targetId, {
-    actorGeneration: actor?.generation,
-    targetGeneration: target?.generation,
-  });
+  bossContext?: BossAuthorizationContext,
+): AuthorizationDecision | FeatureAwareAuthorizationDecision {
+  return authorizeBossAwareSessionAction(sessions, actorId, action, targetId, bossContext);
 }
 
 export function visibleSessions(sessions: Iterable<SessionInfo>, actorId: string): SessionInfo[] {

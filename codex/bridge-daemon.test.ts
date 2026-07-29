@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { IntercomClient } from "../broker/client.ts";
-import { VirtualCodexAgent, getApprovedIntercomSend, getApprovedIntercomToolFromApproval, getCompletedIntercomSend, isIntercomToolApprovalRequest, threadSandboxMode } from "./bridge-daemon.ts";
+import { CodexBridgeDaemon, VirtualCodexAgent, getApprovedIntercomSend, getApprovedIntercomToolFromApproval, getCompletedIntercomSend, isIntercomToolApprovalRequest, threadSandboxMode } from "./bridge-daemon.ts";
 
 class FakeIntercomClient extends EventEmitter {
   connected = false;
@@ -154,4 +157,29 @@ test("threadSandboxMode maps bridge sandbox policies to codex thread modes", () 
   assert.equal(threadSandboxMode({ type: "workspaceWrite" }), "workspace-write");
   assert.equal(threadSandboxMode({ type: "dangerFullAccess" }), "danger-full-access");
   assert.equal(threadSandboxMode(undefined), "read-only");
+});
+
+test("protected bridge rejects hostile PATH Codex before app-client or process creation", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-provider-bridge-"));
+  const marker = join(dir, "executed");
+  const executable = join(dir, "codex");
+  writeFileSync(executable, `#!/bin/sh\nprintf hostile > '${marker}'\n`);
+  chmodSync(executable, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = dir;
+  try {
+    assert.throws(
+      () => new CodexBridgeDaemon({
+        statePath: join(dir, "state.json"),
+        agents: [{ id: "reviewer", name: "reviewer", cwd: dir, bossClient: "boss_reviewer" }],
+      }),
+      (error: unknown) => (error as { code?: unknown }).code === "PROVIDER_AUTHORITY_UNAVAILABLE",
+    );
+    assert.equal(existsSync(marker), false);
+    assert.equal(existsSync(join(dir, "state.json")), false);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

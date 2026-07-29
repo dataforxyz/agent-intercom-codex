@@ -13,7 +13,7 @@ async function sourceFixture() {
   await writeFile(join(root, "broker", "client.ts"), "export const client = 1;\n");
   await writeFile(join(root, "broker", "client.test.ts"), "ignored test\n");
   await writeFile(join(root, "codex", "coi.ts"), "export const coi = 1;\n");
-  for (const file of ["config.ts", "durable-json.ts", "outbound-outbox.ts", "types.ts"]) {
+  for (const file of ["config.ts", "boss-control-outbox.ts", "durable-json.ts", "outbound-outbox.ts", "types.ts"]) {
     await writeFile(join(root, file), `${file}\n`);
   }
   await writeFile(join(root, "package.json"), "{}\n");

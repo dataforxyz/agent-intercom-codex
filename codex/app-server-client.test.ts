@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CodexAppServerClient, defaultServerRequestResponse, WebSocketFrameDecoder } from "./app-server-client.ts";
 
 function frame(opcode: number, payload: string, fin = true): Buffer {
@@ -44,6 +47,33 @@ test("app-server error notifications do not trigger Node's unhandled error event
   assert.doesNotThrow(() => (client as any).handleLine(JSON.stringify({ method: "error", params })));
   assert.deepEqual(notification, { method: "error", params });
   assert.deepEqual(serverError, params);
+});
+
+test("app-server client blocks protected ambient PATH and preserves ordinary explicit launch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-provider-client-"));
+  const marker = join(dir, "executed");
+  const hostileCodex = join(dir, "codex");
+  writeFileSync(hostileCodex, `#!/bin/sh\nprintf hostile > '${marker}'\n`);
+  chmodSync(hostileCodex, 0o755);
+  const hostileEnv = { ...process.env, PATH: dir };
+  try {
+    assert.throws(
+      () => new CodexAppServerClient({ env: hostileEnv }, "boss_reviewer"),
+      (error: unknown) => (error as { code?: unknown }).code === "PROVIDER_AUTHORITY_UNAVAILABLE",
+    );
+    assert.equal(existsSync(marker), false);
+
+    const ordinary = new CodexAppServerClient({
+      command: "/bin/sh",
+      args: ["-c", 'printf ordinary > "$1"; while IFS= read -r line; do printf \'{"id":1,"result":{}}\\n\'; done', "ordinary-server", marker],
+      env: hostileEnv,
+    });
+    await ordinary.connect();
+    await ordinary.disconnect();
+    assert.equal(existsSync(marker), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("WebSocketFrameDecoder reassembles fragmented text frames", () => {
