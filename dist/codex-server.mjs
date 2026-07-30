@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-process.stderr.write("[agent-intercom-build] package=@dataforxyz/agent-intercom-codex version=0.10.0 target=codex-server sourceSha256=e3924d8a81ca3579d920e6938f77fe75f36c8eeb02d45b49b2d940b7a67b6410\n");
+process.stderr.write("[agent-intercom-build] package=@dataforxyz/agent-intercom-codex version=0.10.0 target=codex-server sourceSha256=1aea5fbf55e45c0849101f166733a90aecd14df2f9159888c75bd2b99c8df505\n");
 
 // codex/server.ts
 import readline from "node:readline";
