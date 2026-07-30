@@ -4,8 +4,16 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { types as nodeUtilTypes } from "node:util";
 import { CodexBridgeDaemon } from "./bridge-daemon.ts";
-import type { BridgeConfig } from "./bridge-config.ts";
+import {
+  assertHardenedBossAgentConfig,
+  parseHardenedBossClientKind,
+  type BridgeAgentConfig,
+  type BridgeConfig,
+} from "./bridge-config.ts";
+import { assertHardenedBossProviderAuthority, type HardenedBossClientKind } from "./boss-client.ts";
+import { assertBossCanonicalData } from "../broker/boss-adapter.ts";
 import { ensureIntercomRuntimeDir, getIntercomDirPath } from "../broker/paths.ts";
 import { copyTextToClipboard, copyTextToTerminalClipboard } from "./clipboard.ts";
 import { formatContactInstruction } from "./contact.ts";
@@ -60,7 +68,12 @@ const CODEX_OPTIONS_WITH_VALUE = new Set([
 const COI_STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MANAGED_MCP_ENV_KEYS = [
   "AGENT_INTERCOM_WORKER_ID",
+  "AGENT_INTERCOM_WORKER_INCARNATION_ID",
+  "AGENT_INTERCOM_WORKER_GENERATION",
   "AGENT_INTERCOM_RUN_ID",
+  "AGENT_INTERCOM_BOSS_RUN_ID",
+  "AGENT_INTERCOM_PARTICIPANT_ID",
+  "AGENT_INTERCOM_BINDING_EPOCH",
   "AGENT_INTERCOM_MANAGER_TARGET",
   "AGENT_INTERCOM_MANAGER_SESSION_ID",
   "AGENT_INTERCOM_SYSTEMD_UNIT",
@@ -152,27 +165,28 @@ export function deriveBridgeAgentRuntimeConfig(args: string[], cwd: string): Bri
   let sandboxMode: string | undefined;
   const writableRoots = new Set<string>([resolve(cwd)]);
 
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
+  const { optionArgs } = splitCodexResumeArgs(args);
+  for (let index = 0; index < optionArgs.length; index += 1) {
+    const arg = optionArgs[index];
     const optionName = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
 
     switch (optionName) {
       case "--ask-for-approval":
       case "-a": {
-        const parsed = readCodexFlagValue(args, index, optionName);
+        const parsed = readCodexFlagValue(optionArgs, index, optionName);
         approvalPolicy = parsed.value;
         index = parsed.nextIndex;
         break;
       }
       case "--sandbox":
       case "-s": {
-        const parsed = readCodexFlagValue(args, index, optionName);
+        const parsed = readCodexFlagValue(optionArgs, index, optionName);
         sandboxMode = parsed.value;
         index = parsed.nextIndex;
         break;
       }
       case "--add-dir": {
-        const parsed = readCodexFlagValue(args, index, optionName);
+        const parsed = readCodexFlagValue(optionArgs, index, optionName);
         writableRoots.add(resolve(cwd, parsed.value));
         index = parsed.nextIndex;
         break;
@@ -200,6 +214,83 @@ export function deriveBridgeAgentRuntimeConfig(args: string[], cwd: string): Bri
   };
 }
 
+const HARDENED_BOSS_RAW_CONFIG_OPTIONS = new Set(["-c", "--config", "-p", "--profile", "--enable", "--disable"]);
+const HARDENED_BOSS_BYPASS_OPTIONS = new Set([
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--dangerously-bypass-hook-trust",
+  "--yolo",
+]);
+
+function isHardenedBossRawConfigOption(optionName: string): boolean {
+  return HARDENED_BOSS_RAW_CONFIG_OPTIONS.has(optionName)
+    || (optionName.startsWith("-c") && optionName !== "-C")
+    || optionName.startsWith("-p");
+}
+
+function hardenedBossAttachedAuthorityOption(arg: string): "-s" | "-a" | "-C" | undefined {
+  if (arg.length <= 2) return undefined;
+  const option = arg.slice(0, 2);
+  return option === "-s" || option === "-a" || option === "-C" ? option : undefined;
+}
+
+/** Validate every user-controlled launch escape before an app-server exists. */
+export function assertHardenedBossCoiLaunch(
+  args: string[],
+  cwd: string,
+  bossClient: HardenedBossClientKind | undefined,
+): BridgeRuntimeConfig {
+  if (bossClient !== undefined) {
+    assertBossCanonicalData(args, "$.argv");
+    if (!Array.isArray(args) || nodeUtilTypes.isProxy(args) || args.some((arg) => typeof arg !== "string")) {
+      throw new Error(`${bossClient} arguments must be a plain dense string array`);
+    }
+  }
+  if (bossClient === undefined) return deriveBridgeAgentRuntimeConfig(args, cwd);
+  let afterSeparator = false;
+  for (const arg of args) {
+    if (arg === "--") {
+      afterSeparator = true;
+      continue;
+    }
+    const attachedAuthorityOption = hardenedBossAttachedAuthorityOption(arg);
+    if (attachedAuthorityOption === "-C") {
+      throw new Error(`${bossClient} cannot expand or replace its writable root`);
+    }
+    if (attachedAuthorityOption !== undefined) {
+      throw new Error(`${bossClient} cannot use attached ${attachedAuthorityOption} policy overrides`);
+    }
+    const optionName = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    if (isHardenedBossRawConfigOption(optionName)) {
+      throw new Error(`${bossClient} cannot use raw ${optionName} or profile configuration`);
+    }
+    if (HARDENED_BOSS_BYPASS_OPTIONS.has(optionName)) {
+      throw new Error(`${bossClient} cannot use approval or sandbox bypass aliases`);
+    }
+    if (optionName === "--add-dir" || optionName === "--cd" || optionName === "-C") {
+      throw new Error(`${bossClient} cannot expand or replace its writable root`);
+    }
+    if (afterSeparator && ["--sandbox", "-s", "--ask-for-approval", "-a"].includes(optionName)) {
+      throw new Error(`${bossClient} cannot place policy overrides after the argument separator`);
+    }
+    if (optionName.startsWith("-") && /(?:yolo|danger|bypass)/i.test(optionName)) {
+      throw new Error(`${bossClient} cannot use approval or sandbox bypass aliases`);
+    }
+  }
+  if (bossClient === "boss_participant") {
+    throw new Error("boss_participant requires unavailable broker-owned assigned workspace authority");
+  }
+  const runtime = deriveBridgeAgentRuntimeConfig(args, cwd);
+  const probe: BridgeAgentConfig = {
+    id: "launch-validation",
+    name: "launch-validation",
+    cwd: resolve(cwd),
+    bossClient,
+    ...runtime,
+  };
+  assertHardenedBossAgentConfig(probe);
+  return runtime;
+}
+
 export function parseCoiArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): CoiOptions {
   const codexArgs: string[] = [];
   const options: Partial<CoiOptions> = {};
@@ -214,6 +305,7 @@ export function parseCoiArgs(argv: string[], env: NodeJS.ProcessEnv = process.en
 
     if (arg === "--") {
       afterSeparator = true;
+      codexArgs.push(arg);
       continue;
     }
 
@@ -277,10 +369,10 @@ export function parseCoiArgs(argv: string[], env: NodeJS.ProcessEnv = process.en
 }
 
 export function hasCodexHelpOrVersion(args: string[]): boolean {
-  return args.some((arg) => arg === "--help" || arg === "-h" || arg === "--version" || arg === "-V");
+  return splitCodexResumeArgs(args).optionArgs.some((arg) => arg === "--help" || arg === "-h" || arg === "--version" || arg === "-V");
 }
 
-export function splitCodexResumeArgs(args: string[]): { optionArgs: string[]; promptArgs: string[] } {
+export function splitCodexResumeArgs(args: string[]): { optionArgs: string[]; promptArgs: string[]; separatorPresent: boolean } {
   const optionArgs: string[] = [];
   const promptArgs: string[] = [];
   let index = 0;
@@ -288,7 +380,7 @@ export function splitCodexResumeArgs(args: string[]): { optionArgs: string[]; pr
     const arg = args[index];
     if (arg === "--") {
       promptArgs.push(...args.slice(index + 1));
-      return { optionArgs, promptArgs };
+      return { optionArgs, promptArgs, separatorPresent: true };
     }
     if (!arg.startsWith("-") || arg === "-") break;
     optionArgs.push(arg);
@@ -299,7 +391,7 @@ export function splitCodexResumeArgs(args: string[]): { optionArgs: string[]; pr
     }
   }
   promptArgs.push(...args.slice(index));
-  return { optionArgs, promptArgs };
+  return { optionArgs, promptArgs, separatorPresent: false };
 }
 
 export function resolveCoiResumeRequest(args: string[]): {
@@ -307,8 +399,8 @@ export function resolveCoiResumeRequest(args: string[]): {
   promptArgs: string[];
   threadId?: string;
 } {
-  const { optionArgs, promptArgs } = splitCodexResumeArgs(args);
-  if (promptArgs[0] !== "resume" || !promptArgs[1]) return { optionArgs, promptArgs };
+  const { optionArgs, promptArgs, separatorPresent } = splitCodexResumeArgs(args);
+  if (separatorPresent || promptArgs[0] !== "resume" || !promptArgs[1]) return { optionArgs, promptArgs };
   return { optionArgs, threadId: promptArgs[1], promptArgs: promptArgs.slice(2) };
 }
 
@@ -319,9 +411,10 @@ export function buildCoiTuiArgs(
   promptArgs: string[],
   explicitResume: boolean,
 ): string[] {
+  const promptTail = promptArgs.length === 0 ? [] : ["--", ...promptArgs];
   return explicitResume
-    ? ["resume", "--remote", remote, ...optionArgs, threadId, ...promptArgs]
-    : ["--remote", remote, ...optionArgs, ...promptArgs];
+    ? ["resume", "--remote", remote, ...optionArgs, threadId, ...promptTail]
+    : ["--remote", remote, ...optionArgs, ...promptTail];
 }
 
 export function buildCodexAppServerArgs(
@@ -390,7 +483,7 @@ function terminalNotification(message: string): void {
   else process.stderr.write(`${safe}\n`);
 }
 
-async function runInteractiveTui(
+export async function runInteractiveTui(
   command: string,
   args: string[],
   refreshArgs: string[],
@@ -398,9 +491,14 @@ async function runInteractiveTui(
   onAltI?: (controls: { insertText(text: string): void }) => void,
   onAltM?: (controls: { insertText(text: string): void }) => void,
   installRefresh?: (refresh: () => void) => () => void,
+  protectedBossClient?: HardenedBossClientKind,
+  launchEnv: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
+  // This also runs on the recursive refresh path below, so a future caller
+  // cannot reintroduce an ambient-PATH spawn after the initial preflight.
+  assertHardenedBossProviderAuthority(protectedBossClient);
   const runInherited = async (): Promise<number> => {
-    const tui = spawn(command, args, { cwd, env: process.env, stdio: "inherit" });
+    const tui = spawn(command, args, { cwd, env: launchEnv, stdio: "inherit" });
     const [code, signal] = await once(tui, "exit") as [number | null, NodeJS.Signals | null];
     if (typeof code === "number") return code;
     return signal === "SIGINT" ? 130 : 1;
@@ -419,11 +517,11 @@ async function runInteractiveTui(
   }
 
   const tui = nodePty.spawn(command, args, {
-    name: process.env.TERM || "xterm-256color",
+    name: launchEnv.TERM || "xterm-256color",
     cols: process.stdout.columns || 80,
     rows: process.stdout.rows || 24,
     cwd,
-    env: process.env,
+    env: launchEnv,
   });
   const outputSubscription = tui.onData((data) => process.stdout.write(data));
   let refreshRequested = false;
@@ -491,7 +589,7 @@ async function runInteractiveTui(
     outputSubscription.dispose();
   }
   if (refreshRequested) {
-    return runInteractiveTui(command, refreshArgs, refreshArgs, cwd, onAltI, onAltM, installRefresh);
+    return runInteractiveTui(command, refreshArgs, refreshArgs, cwd, onAltI, onAltM, installRefresh, protectedBossClient, launchEnv);
   }
   return exitCode;
 }
@@ -520,11 +618,19 @@ export function resetCoiStateForFreshStart(statePath: string, fresh: boolean): v
   if (fresh) rmSync(statePath, { force: true });
 }
 
-export async function runCoi(options: CoiOptions): Promise<number> {
+export async function runCoi(options: CoiOptions, env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  const bossClient = parseHardenedBossClientKind(env.CODEX_INTERCOM_BOSS_CLIENT?.trim(), "CODEX_INTERCOM_BOSS_CLIENT");
+  // No provider executable/artifact authority is broker-owned yet. Fail
+  // before help, app-server, headless, TUI, refresh, or runtime-file setup.
+  assertHardenedBossProviderAuthority(bossClient);
+  if (bossClient !== undefined && options.codexCommand !== "codex") {
+    throw new Error(`${bossClient} cannot use a caller-provided Codex/app-server command`);
+  }
+  const runtimeConfig = assertHardenedBossCoiLaunch(options.codexArgs, options.cwd, bossClient);
   if (hasCodexHelpOrVersion(options.codexArgs)) {
     const help = spawn(options.codexCommand, options.codexArgs, {
       cwd: options.cwd,
-      env: process.env,
+      env,
       stdio: "inherit",
     });
     const [code, signal] = await once(help, "exit") as [number | null, NodeJS.Signals | null];
@@ -540,17 +646,30 @@ export async function runCoi(options: CoiOptions): Promise<number> {
   cleanupOldCoiStateFiles(intercomDir);
   const socketPath = options.socketPath ?? join(intercomDir, `coi-${process.pid}.sock`);
   const statePath = options.statePath ?? join(intercomDir, `coi-${sanitizeSegment(id)}-state.json`);
-  const fresh = process.env.AGENT_INTERCOM_FRESH === "1";
+  const fresh = env.AGENT_INTERCOM_FRESH === "1";
   resetCoiStateForFreshStart(statePath, fresh);
   rmSync(socketPath, { force: true });
 
-  const appServer = spawn(options.codexCommand, buildCodexAppServerArgs(options.codexArgs, socketPath), {
+  const resumeRequest = resolveCoiResumeRequest(options.codexArgs);
+  const agent: BridgeAgentConfig = {
+    id,
+    name,
     cwd: options.cwd,
-    env: process.env,
+    model: env.CODEX_INTERCOM_MODEL,
+    instructions: options.instructions,
+    threadId: fresh ? undefined : resumeRequest.threadId,
+    ...(bossClient === undefined ? {} : { bossClient }),
+    ...runtimeConfig,
+  };
+  assertHardenedBossAgentConfig(agent);
+
+  const appServer = spawn(options.codexCommand, buildCodexAppServerArgs(options.codexArgs, socketPath, env), {
+    cwd: options.cwd,
+    env,
     stdio: ["ignore", "ignore", "pipe"],
   });
   appServer.stderr?.on("data", (chunk) => {
-    if (process.env.CODEX_INTERCOM_DEBUG) process.stderr.write(String(chunk));
+    if (env.CODEX_INTERCOM_DEBUG) process.stderr.write(String(chunk));
   });
 
   const cleanup = async () => {
@@ -576,22 +695,13 @@ export async function runCoi(options: CoiOptions): Promise<number> {
 
   await waitForSocket(socketPath, appServer);
 
-  const resumeRequest = resolveCoiResumeRequest(options.codexArgs);
   const config: BridgeConfig = {
     statePath,
     appServer: {
       transport: "unix-websocket",
       socketPath,
     },
-    agents: [{
-      id,
-      name,
-      cwd: options.cwd,
-      model: process.env.CODEX_INTERCOM_MODEL,
-      instructions: options.instructions,
-      threadId: fresh ? undefined : resumeRequest.threadId,
-      ...deriveBridgeAgentRuntimeConfig(options.codexArgs, options.cwd),
-    }],
+    agents: [agent],
   };
   let refreshVisibleTui: (() => void) | undefined;
   daemon = new CodexBridgeDaemon(config, {
@@ -628,7 +738,7 @@ export async function runCoi(options: CoiOptions): Promise<number> {
     void daemon!.getContactTargetForAgent(id)
       .then(async (contact) => {
         const instruction = formatContactInstruction(contact);
-        const preferTerminal = Boolean(process.env.SSH_TTY || process.env.SSH_CONNECTION);
+        const preferTerminal = Boolean(env.SSH_TTY || env.SSH_CONNECTION);
         let copied = preferTerminal
           ? copyTextToTerminalClipboard(instruction, (sequence) => process.stdout.write(sequence))
           : await copyTextToClipboard(instruction);
@@ -668,6 +778,8 @@ export async function runCoi(options: CoiOptions): Promise<number> {
           if (refreshVisibleTui === refresh) refreshVisibleTui = undefined;
         };
       },
+      bossClient,
+      env,
     );
   } finally {
     await cleanupOnce();

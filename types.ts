@@ -1,3 +1,30 @@
+import type {
+  BossControlEnvelope,
+  BossParticipantBinding,
+  BossParticipantCredentialEnvelope,
+  BossRunFeatureContract,
+  BrokerCapabilityAdvertisement,
+  ParticipantState,
+  WorkerIdentityV2,
+} from "@dataforxyz/agent-intercom-core/boss";
+
+export interface BossParticipantRegistrationMetadata {
+  featureContract: BossRunFeatureContract;
+  credential: BossParticipantCredentialEnvelope;
+}
+
+/** Broker-owned metadata. Clients may request Boss registration but never assert a binding. */
+export interface BossParticipantBindingMetadata {
+  featureContract: BossRunFeatureContract;
+  binding: BossParticipantBinding;
+  brokerIdentityVerified: true;
+  assignedParticipantIds?: string[];
+  requestingPrincipalId?: string;
+  /** Required by Boss roster projection before a session is discoverable. */
+  workerIdentity?: WorkerIdentityV2;
+  participantState?: ParticipantState;
+}
+
 export interface SessionInfo {
   id: string;
   name?: string;
@@ -18,6 +45,7 @@ export interface SessionInfo {
   depth?: number;
   maxDepth?: number;
   maxChildren?: number;
+  boss?: BossParticipantBindingMetadata;
 }
 
 export interface Message {
@@ -38,13 +66,24 @@ export interface Attachment {
   language?: string;
 }
 
-export type SessionRegistration = Omit<
+type SessionRegistrationBase = Omit<
   SessionInfo,
-  "id" | "peerUid" | "trustedLocal" | "origin" | "remoteHostId" | "parentSessionId" | "rootSessionId" | "generation" | "canDelegate" | "depth" | "maxDepth" | "maxChildren"
+  "id" | "peerUid" | "trustedLocal" | "origin" | "remoteHostId" | "parentSessionId" | "rootSessionId" | "generation" | "canDelegate" | "depth" | "maxDepth" | "maxChildren" | "boss"
 > & {
   /** Ephemeral identity shared only by reconnects from one live runtime. */
   runtimeInstanceId?: string;
 };
+
+export type OrdinarySessionRegistration = SessionRegistrationBase & {
+  boss?: never;
+};
+
+export type BossSessionRegistration = SessionRegistrationBase & {
+  /** Optional untrusted request; only a protected, attested broker may return a binding. */
+  boss: BossParticipantRegistrationMetadata;
+};
+
+export type SessionRegistration = OrdinarySessionRegistration | BossSessionRegistration;
 
 export interface RemoteEnrollmentAccess {
   enrollmentToken: string;
@@ -112,12 +151,22 @@ export type DeliveryFailureCode =
   | "SENDER_DISCONNECTED"
   | "DELIVERY_TIMEOUT";
 
+export type BossControlFailureCode =
+  | "INVALID_CONTROL"
+  | "IDEMPOTENCY_CONFLICT"
+  | "SESSION_NOT_FOUND"
+  | "POLICY_DENIED"
+  | "RECIPIENT_DISCONNECTED"
+  | "DELIVERY_TIMEOUT";
+
 export type BrokerErrorCode =
   | "PROTOCOL_MISMATCH"
   | "INVALID_REQUEST"
   | "SESSION_ID_IN_USE"
   | "ACCESS_DENIED"
   | "REMOTE_ACCESS_INCOMPATIBLE"
+  | "BOSS_FEATURE_UNAVAILABLE"
+  | "BOSS_CONTRACT_MISMATCH"
   | "RATE_LIMITED"
   | "TOO_MANY_SESSIONS";
 
@@ -130,7 +179,8 @@ export type AskCancellationReason =
 
 export type ClientMessage =
   | { type: "health"; requestId: string; stateId?: string }
-  | { type: "register"; protocol: string; version: number; session: SessionRegistration; sessionId?: string; stateId?: string; access?: RemoteRegistrationAccess }
+  | { type: "register"; protocol: string; version: number; session: OrdinarySessionRegistration; sessionId?: string; stateId?: string; access?: RemoteRegistrationAccess }
+  | { type: "register"; registrationKind: "boss"; protocol: string; version: number; session: BossSessionRegistration; sessionId?: string; stateId?: string; access?: never }
   | { type: "access_control"; requestId: string; adminToken: string; action: "issue_enrollment"; enrollment: { name: string; parentSessionId: string; rootSessionId: string; remoteHostId: string; ttlMs?: number; expiresAt?: number; canDelegate?: boolean; maxDepth?: number; maxChildren?: number } }
   | { type: "access_control"; requestId: string; adminToken: string; action: "revoke_subtree"; principalId: string }
   | { type: "access_control"; requestId: string; adminToken: string; action: "inspect_tree"; principalId: string }
@@ -140,6 +190,8 @@ export type ClientMessage =
   | { type: "unregister"; preserveAsks?: boolean }
   | { type: "list"; requestId: string }
   | { type: "send"; to: string; message: Message }
+  | { type: "boss_control"; requestId: string; to: string; envelope: BossControlEnvelope }
+  | { type: "boss_control_received"; deliveryId: string; messageId: string; idempotencyKey: string }
   | { type: "message_received"; deliveryId: string }
   | { type: "message_rejected"; deliveryId: string; code: "CONFLICTING_MESSAGE_ID"; reason: string }
   | { type: "defer_ask"; requestId: string; messageId: string }
@@ -147,8 +199,9 @@ export type ClientMessage =
   | { type: "presence"; name?: string; status?: string; model?: string };
 
 export type BrokerMessage =
-  | { type: "health_ok"; requestId: string; protocol: string; version: number; endpoint: "local" | "remote"; remoteAccess?: RemoteAccessContract }
+  | { type: "health_ok"; requestId: string; protocol: string; version: number; endpoint: "local" | "remote"; remoteAccess?: RemoteAccessContract; capabilities?: BrokerCapabilityAdvertisement }
   | { type: "registered"; sessionId: string; protocol: string; version: number; remoteAccess?: RemoteAccessContract; access?: RemoteAccessMetadata }
+  | { type: "registered"; registrationKind: "boss"; sessionId: string; protocol: string; version: number; capabilities: BrokerCapabilityAdvertisement; boss: BossParticipantBindingMetadata; remoteAccess?: never; access?: never }
   | { type: "access_control_result"; requestId: string; action: "issue_enrollment"; enrollmentToken: string; expiresAt: number }
   | { type: "access_control_result"; requestId: string; action: "revoke_subtree"; changedPrincipalIds: string[] }
   | { type: "access_control_result"; requestId: string; action: "inspect_tree"; principals: RemotePrincipalSummary[] }
@@ -156,6 +209,10 @@ export type BrokerMessage =
   | { type: "access_control_result"; requestId: string; action: "issue_child_enrollment"; enrollmentToken: string; expiresAt: number; parentSessionId: string }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }
   | { type: "message"; deliveryId: string; from: SessionInfo; message: Message }
+  | { type: "boss_control"; deliveryId: string; from: SessionInfo; envelope: BossControlEnvelope }
+  | { type: "boss_control_ack"; requestId: string; messageId: string; idempotencyKey: string; status: "accepted"; deliveryId: string }
+  | { type: "boss_control_result"; requestId: string; messageId: string; idempotencyKey: string; status: "delivered"; delivered: true; deliveryId: string }
+  | { type: "boss_control_result"; requestId: string; messageId: string; idempotencyKey: string; status: "rejected"; delivered: false; deliveryId?: string; code: BossControlFailureCode; reason: string }
   | { type: "presence_update"; session: SessionInfo }
   | { type: "session_joined"; session: SessionInfo }
   | { type: "session_left"; sessionId: string }

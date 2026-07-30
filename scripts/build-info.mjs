@@ -8,6 +8,7 @@ const RUNTIME_ROOTS = [
 ];
 const RUNTIME_FILES = [
   "config.ts",
+  "boss-control-outbox.ts",
   "durable-json.ts",
   "outbound-outbox.ts",
   "package.json",

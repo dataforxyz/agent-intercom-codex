@@ -2,10 +2,23 @@ import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { CodexAppServerClient, defaultServerRequestResponse, type JsonRpcMessage } from "./app-server-client.ts";
-import { loadBridgeConfig, loadBridgeState, saveBridgeState, type BridgeAgentConfig, type BridgeConfig, type BridgeState } from "./bridge-config.ts";
+import {
+  bridgeAgentApprovalPolicy,
+  bridgeAgentDefaultSandbox,
+  assertHardenedBossAgentConfig,
+  assertHardenedBossBridgeConfig,
+  loadBridgeConfig,
+  loadBridgeState,
+  saveBridgeState,
+  type BridgeAgentConfig,
+  type BridgeConfig,
+  type BridgeState,
+} from "./bridge-config.ts";
 import { IntercomClient } from "../broker/client.ts";
+import { assertBossCanonicalData } from "../broker/boss-adapter.ts";
 import { spawnBrokerIfNeeded } from "../broker/spawn.ts";
 import { DEFAULT_ASK_TIMEOUT_MS, loadConfig, validateAskTimeoutMs } from "../config.ts";
+import { assertHardenedBossProviderAuthority, type HardenedBossClientKind } from "./boss-client.ts";
 import type { Message, SessionInfo } from "../types.ts";
 import { resolveContactTarget, type IntercomContact } from "./contact.ts";
 import { formatAttachments, formatSessionDisplay, formatSessionList, resolveSessionTarget, type ToolResult } from "./runtime.ts";
@@ -118,6 +131,31 @@ export function threadSandboxMode(sandboxPolicy: unknown): string {
     default:
       return "read-only";
   }
+}
+
+function protectedBossClientForBridge(config: BridgeConfig): HardenedBossClientKind | undefined {
+  // Reject accessors/proxies before reading a deny-only launch marker.
+  assertBossCanonicalData(config, "$.bridgeConfig");
+  if (!Array.isArray(config.agents)) return undefined;
+  for (const agent of config.agents) {
+    if (typeof agent !== "object" || agent === null || Array.isArray(agent)) continue;
+    if (agent.bossClient === "boss_participant" || agent.bossClient === "boss_reviewer") return agent.bossClient;
+  }
+  return undefined;
+}
+
+function bridgeAgentSandboxMode(agent: BridgeAgentConfig): string {
+  return agent.sandboxPolicy === undefined
+    ? bridgeAgentDefaultSandbox(agent) ?? "read-only"
+    : threadSandboxMode(agent.sandboxPolicy);
+}
+
+function bridgeAgentTurnSandboxPolicy(agent: BridgeAgentConfig): unknown {
+  if (agent.sandboxPolicy !== undefined) return agent.sandboxPolicy;
+  if (bridgeAgentSandboxMode(agent) === "workspace-write") {
+    throw new Error("workspace-write requires unavailable broker-owned assigned workspace authority");
+  }
+  return { type: "readOnly", networkAccess: false };
 }
 
 function getTurnId(result: unknown): string {
@@ -435,12 +473,12 @@ export class VirtualCodexAgent {
   async ensureThread(): Promise<string> {
     if (this.threadId) {
       try {
-        const sandbox = threadSandboxMode(this.agent.sandboxPolicy);
+        const sandbox = bridgeAgentSandboxMode(this.agent);
         await this.app.request("thread/resume", {
           threadId: this.threadId,
           cwd: this.agent.cwd,
           model: this.agent.model ?? null,
-          approvalPolicy: this.agent.approvalPolicy ?? "never",
+          approvalPolicy: bridgeAgentApprovalPolicy(this.agent),
           sandbox,
         });
         return this.threadId;
@@ -449,11 +487,11 @@ export class VirtualCodexAgent {
       }
     }
 
-    const sandbox = threadSandboxMode(this.agent.sandboxPolicy);
+    const sandbox = bridgeAgentSandboxMode(this.agent);
     const result = await this.app.request("thread/start", {
       cwd: this.agent.cwd,
       model: this.agent.model ?? null,
-      approvalPolicy: this.agent.approvalPolicy ?? "never",
+      approvalPolicy: bridgeAgentApprovalPolicy(this.agent),
       sandbox,
       serviceName: "codex-intercom",
       developerInstructions: this.agent.instructions ?? null,
@@ -511,8 +549,8 @@ export class VirtualCodexAgent {
       threadId,
       input,
       cwd: this.agent.cwd,
-      approvalPolicy: this.agent.approvalPolicy ?? "never",
-      sandboxPolicy: this.agent.sandboxPolicy ?? { type: "readOnly", networkAccess: false },
+      approvalPolicy: bridgeAgentApprovalPolicy(this.agent),
+      sandboxPolicy: bridgeAgentTurnSandboxPolicy(this.agent),
       model: this.agent.model ?? null,
     });
   }
@@ -738,11 +776,22 @@ export class CodexBridgeDaemon {
   private inflightToolCalls = new Map<string | number, AbortController>();
 
   constructor(private readonly config: BridgeConfig, private readonly hooks: CodexBridgeHooks = {}) {
-    this.app = new CodexAppServerClient(config.appServer);
+    // A marker is deny-only here: no config field can provide executable or
+    // artifact authority.
+    const protectedBossClient = protectedBossClientForBridge(config);
+    assertHardenedBossProviderAuthority(protectedBossClient);
+    assertHardenedBossBridgeConfig(config);
+    for (const agent of config.agents) assertHardenedBossAgentConfig(agent);
+    this.app = new CodexAppServerClient(config.appServer, protectedBossClient);
     this.app.setServerRequestHandler((message) => this.handleServerRequest(message));
   }
 
   async start(): Promise<void> {
+    // Revalidate immediately before CodexAppServerClient reaches either its
+    // daemon spawnSync or stdio spawn boundary.
+    assertHardenedBossProviderAuthority(protectedBossClientForBridge(this.config));
+    assertHardenedBossBridgeConfig(this.config);
+    for (const agent of this.config.agents) assertHardenedBossAgentConfig(agent);
     const intercomConfig = loadConfig();
     await spawnBrokerIfNeeded(intercomConfig.brokerCommand, intercomConfig.brokerArgs);
     await this.app.connect();

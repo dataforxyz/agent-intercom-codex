@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-process.stderr.write("[agent-intercom-build] package=@dataforxyz/agent-intercom-codex version=0.10.0 target=coi sourceSha256=28cbe04c291ec9ca89e519b437e41d7a7c359f85cf99d2fcf3e6cb0f74dcee2c\n");
+process.stderr.write("[agent-intercom-build] package=@dataforxyz/agent-intercom-codex version=0.10.0 target=coi sourceSha256=e3924d8a81ca3579d920e6938f77fe75f36c8eeb02d45b49b2d940b7a67b6410\n");
 
 // codex/coi.ts
 import { once as once2 } from "node:events";
 import { spawn as spawn4, spawnSync as spawnSync2 } from "node:child_process";
-import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync5, readdirSync, rmSync, statSync } from "node:fs";
-import { basename as basename2, join as join7, resolve as resolve4 } from "node:path";
+import { createHash as createHash4 } from "node:crypto";
+import { existsSync as existsSync6, readdirSync, rmSync, statSync } from "node:fs";
+import { basename as basename2, join as join8, resolve as resolve4 } from "node:path";
 import { setTimeout as delay2 } from "node:timers/promises";
+import { types as nodeUtilTypes4 } from "node:util";
 
 // codex/bridge-daemon.ts
 import { once } from "node:events";
@@ -21,6 +22,27 @@ import { randomBytes, createHash } from "node:crypto";
 import net from "node:net";
 import readline from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
+
+// codex/boss-client.ts
+var HARDENED_BOSS_CODEX_DEFAULTS = Object.freeze({
+  boss_participant: Object.freeze({ approvalPolicy: "untrusted", sandbox: "workspace-write" }),
+  boss_reviewer: Object.freeze({ approvalPolicy: "untrusted", sandbox: "read-only" })
+});
+var PROVIDER_AUTHORITY_UNAVAILABLE = "PROVIDER_AUTHORITY_UNAVAILABLE";
+var ProviderAuthorityUnavailableError = class extends Error {
+  constructor(bossClient) {
+    super(`${PROVIDER_AUTHORITY_UNAVAILABLE}: ${bossClient} requires a broker-owned, artifact-attested Codex provider executable`);
+    this.bossClient = bossClient;
+    this.name = "ProviderAuthorityUnavailableError";
+  }
+  bossClient;
+  code = PROVIDER_AUTHORITY_UNAVAILABLE;
+};
+function assertHardenedBossProviderAuthority(bossClient) {
+  if (bossClient !== void 0) throw new ProviderAuthorityUnavailableError(bossClient);
+}
+
+// codex/app-server-client.ts
 var DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60 * 1e3;
 var MAX_WEBSOCKET_MESSAGE_BYTES = 16 * 1024 * 1024;
 var UNIX_WEBSOCKET_CONNECT_TIMEOUT_MS = 1e4;
@@ -57,8 +79,9 @@ var CodexAppServerClient = class extends EventEmitter {
   pending = /* @__PURE__ */ new Map();
   initialized = false;
   options;
-  constructor(options = {}) {
+  constructor(options = {}, protectedBossClient) {
     super();
+    assertHardenedBossProviderAuthority(protectedBossClient);
     this.options = {
       command: options.command ?? "codex",
       args: options.args ?? ["app-server"],
@@ -68,7 +91,8 @@ var CodexAppServerClient = class extends EventEmitter {
       startDaemon: options.startDaemon ?? false,
       startDaemonCommand: options.startDaemonCommand ?? "codex",
       startDaemonArgs: options.startDaemonArgs ?? ["app-server", "daemon", "start"],
-      requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
+      requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      env: options.env ?? process.env
     };
   }
   setServerRequestHandler(handler) {
@@ -79,6 +103,7 @@ var CodexAppServerClient = class extends EventEmitter {
     if (this.options.startDaemon) {
       const started = spawnSync(this.options.startDaemonCommand, this.options.startDaemonArgs, {
         encoding: "utf8",
+        env: this.options.env,
         stdio: ["ignore", "pipe", "pipe"]
       });
       if (started.status !== 0) {
@@ -92,7 +117,7 @@ var CodexAppServerClient = class extends EventEmitter {
     }
     const proc = spawn(this.options.command, this.options.args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env
+      env: this.options.env
     });
     this.proc = proc;
     this.rl = readline.createInterface({ input: proc.stdout, crlfDelay: Infinity });
@@ -482,8 +507,9 @@ var WebSocketFrameDecoder = class {
 
 // codex/bridge-config.ts
 import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync } from "node:fs";
-import { dirname, join as join2, resolve as resolve2 } from "node:path";
+import { dirname, join as join2, parse as parsePath, resolve as resolve2 } from "node:path";
 import { cwd as processCwd } from "node:process";
+import { types as nodeUtilTypes2 } from "node:util";
 
 // broker/paths.ts
 import { chmodSync, mkdirSync, readFileSync } from "fs";
@@ -555,11 +581,314 @@ function restrictIntercomRuntimeFile(filePath, platform = process.platform) {
   }
 }
 
+// broker/boss-adapter.ts
+import {
+  BOSS_CAPABILITY_FEATURE_DIGEST,
+  BOSS_CONTROL_ENVELOPE_VERSION,
+  BOSS_POLICY_PRINCIPAL_VERSION,
+  BOSS_POLICY_SEMANTICS_HASH,
+  BOSS_RUN_FEATURE,
+  BOSS_RUN_FEATURE_CONTRACT,
+  BOSS_RUN_FEATURE_SEMANTICS_HASH,
+  BOSS_RUN_FEATURE_VERSION,
+  BOSS_RUN_PROTOCOL_FEATURE_CONTRACT_HASH,
+  BROKER_FEATURE_ATTESTATION_VERSION,
+  INTERCOM_BASE_PROTOCOL_VERSION,
+  authorizeFeatureAware,
+  brokerFeatureSetHash,
+  parseBossControlEnvelope,
+  parseBossParticipantBinding,
+  parseBossParticipantCredentialEnvelope,
+  parseBossRunFeatureContract,
+  parseBrokerCapabilityAdvertisement,
+  parseParticipantState,
+  parseWorkerIdentityV2
+} from "@dataforxyz/agent-intercom-core/boss";
+import {
+  ContractValidationError,
+  assertExactKeys,
+  assertRecord,
+  canonicalJson
+} from "@dataforxyz/agent-intercom-core/canonical";
+import { types as nodeUtilTypes } from "node:util";
+var BOSS_ADVERTISEMENT_PREDICATES = [
+  "protectedProvider",
+  "brokerIdentity",
+  "credentialRegistry",
+  "authorityTransitions",
+  "participantHealth"
+];
+var DORMANT_BOSS_ADVERTISEMENT_READINESS = Object.freeze({
+  protectedProvider: false,
+  brokerIdentity: false,
+  credentialRegistry: false,
+  authorityTransitions: false,
+  participantHealth: false
+});
+var ORDINARY_SESSION_REGISTRATION_KEYS = [
+  "cwd",
+  "model",
+  "pid",
+  "startedAt",
+  "lastActivity"
+];
+var OPTIONAL_SESSION_REGISTRATION_KEYS = ["name", "status", "runtimeInstanceId"];
+function assertBossCanonicalData(value, path = "$", seen = /* @__PURE__ */ new WeakSet()) {
+  if (typeof value !== "object" || value === null) return;
+  if (nodeUtilTypes.isProxy(value)) {
+    throw new ContractValidationError(path, "proxies are not supported");
+  }
+  if (seen.has(value)) throw new ContractValidationError(path, "cyclic values are not supported");
+  seen.add(value);
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) {
+      throw new ContractValidationError(path, "must use the exact Array prototype");
+    }
+    const ownKeys = Reflect.ownKeys(value);
+    const expectedKeys = /* @__PURE__ */ new Set(["length"]);
+    for (let index = 0; index < value.length; index += 1) expectedKeys.add(String(index));
+    if (ownKeys.length !== expectedKeys.size || ownKeys.some((key) => !expectedKeys.has(key))) {
+      throw new ContractValidationError(path, "must be a dense array without symbols or extra properties");
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.hasOwn(value, index)) {
+        throw new ContractValidationError(`${path}[${index}]`, "sparse array holes are not supported");
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (descriptor === void 0 || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) {
+        throw new ContractValidationError(`${path}[${index}]`, "must be an own enumerable data property");
+      }
+      assertBossCanonicalData(descriptor.value, `${path}[${index}]`, seen);
+    }
+    return;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new ContractValidationError(path, "must use the exact Object prototype");
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") throw new ContractValidationError(path, "symbol properties are not supported");
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === void 0 || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) {
+      throw new ContractValidationError(`${path}.${key}`, "must be an own enumerable data property");
+    }
+    assertBossCanonicalData(descriptor.value, `${path}.${key}`, seen);
+  }
+}
+function parseBossAdvertisementReadiness(value) {
+  assertBossCanonicalData(value, "$.readiness");
+  assertRecord(value);
+  assertExactKeys(value, BOSS_ADVERTISEMENT_PREDICATES);
+  const parsed = {};
+  for (const predicate of BOSS_ADVERTISEMENT_PREDICATES) {
+    const enabled = ownDataValue(value, predicate);
+    if (typeof enabled !== "boolean") {
+      throw new ContractValidationError(`$.readiness.${predicate}`, "must be a boolean");
+    }
+    parsed[predicate] = enabled;
+  }
+  return parsed;
+}
+function missingBossAdvertisementPredicates(readiness = DORMANT_BOSS_ADVERTISEMENT_READINESS) {
+  const parsed = parseBossAdvertisementReadiness(readiness);
+  return BOSS_ADVERTISEMENT_PREDICATES.filter((predicate) => parsed[predicate] !== true);
+}
+function bossCapabilityAdvertisement(readiness = DORMANT_BOSS_ADVERTISEMENT_READINESS) {
+  if (missingBossAdvertisementPredicates(readiness).length > 0) return void 0;
+  const features = [{
+    version: BROKER_FEATURE_ATTESTATION_VERSION,
+    feature: BOSS_RUN_FEATURE,
+    featureVersion: BOSS_RUN_FEATURE_VERSION,
+    semanticsHash: BOSS_RUN_FEATURE_SEMANTICS_HASH,
+    controlEnvelopeVersion: BOSS_CONTROL_ENVELOPE_VERSION,
+    capabilityDigest: BOSS_CAPABILITY_FEATURE_DIGEST
+  }];
+  return parseBrokerCapabilityAdvertisement({
+    baseProtocolVersion: INTERCOM_BASE_PROTOCOL_VERSION,
+    features,
+    protocolFeatureContractHash: BOSS_RUN_PROTOCOL_FEATURE_CONTRACT_HASH,
+    featureSetHash: brokerFeatureSetHash(features),
+    controlEnvelopeVersion: BOSS_CONTROL_ENVELOPE_VERSION,
+    capabilityDigest: BOSS_CAPABILITY_FEATURE_DIGEST
+  });
+}
+function optionalOwnDataValue(value, key) {
+  assertRecord(value);
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === void 0) return void 0;
+  if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value")) {
+    throw new ContractValidationError(`$.${key}`, "must be an own enumerable data property");
+  }
+  return descriptor.value;
+}
+function ownDataValue(value, key) {
+  const result = optionalOwnDataValue(value, key);
+  if (result === void 0) throw new ContractValidationError(`$.${key}`, "is required");
+  return result;
+}
+function parseBossParticipantRegistrationMetadata(value) {
+  assertBossCanonicalData(value);
+  assertRecord(value);
+  assertExactKeys(value, ["featureContract", "credential"]);
+  const featureContract = parseBossRunFeatureContract(ownDataValue(value, "featureContract"));
+  if (featureContract.baseProtocolVersion !== INTERCOM_BASE_PROTOCOL_VERSION || canonicalJson(featureContract) !== canonicalJson(BOSS_RUN_FEATURE_CONTRACT)) {
+    throw new ContractValidationError("$.featureContract", "must exactly negotiate boss-run-v1 over base protocol v3");
+  }
+  const credential = parseBossParticipantCredentialEnvelope(ownDataValue(value, "credential"));
+  if (credential.namespace !== featureContract.feature) {
+    throw new ContractValidationError("$.credential.namespace", "must match the negotiated feature namespace");
+  }
+  return { featureContract, credential };
+}
+function exactRegistrationKind(session, value) {
+  assertBossCanonicalData(session, "$.session");
+  assertRecord(session);
+  const boss = optionalOwnDataValue(session, "boss");
+  if (boss === void 0) {
+    if (value === void 0) return "ordinary";
+    throw new ContractValidationError("$.registrationKind", "must be absent when Boss metadata is absent");
+  }
+  if (value !== "boss") {
+    throw new ContractValidationError("$.registrationKind", "must be boss when Boss metadata is present");
+  }
+  return "boss";
+}
+function parseExactRegistrationFrame(value) {
+  assertBossCanonicalData(value, "$.register");
+  assertRecord(value);
+  const session = ownDataValue(value, "session");
+  assertRecord(session);
+  const registrationKind = optionalOwnDataValue(value, "registrationKind");
+  const kind = exactRegistrationKind(session, registrationKind);
+  if (kind === "ordinary") {
+    assertExactKeys(value, ["type", "protocol", "version", "session"], ["sessionId", "stateId", "access"]);
+    assertExactKeys(session, ORDINARY_SESSION_REGISTRATION_KEYS, OPTIONAL_SESSION_REGISTRATION_KEYS);
+  } else {
+    assertExactKeys(value, ["type", "registrationKind", "protocol", "version", "session"], ["sessionId", "stateId"]);
+    assertExactKeys(session, [...ORDINARY_SESSION_REGISTRATION_KEYS, "boss"], OPTIONAL_SESSION_REGISTRATION_KEYS);
+    parseBossParticipantRegistrationMetadata(ownDataValue(session, "boss"));
+  }
+  if (ownDataValue(value, "type") !== "register") {
+    throw new ContractValidationError("$.register.type", "must be register");
+  }
+  return value;
+}
+function parseExactRegisteredFrame(value, expected) {
+  assertBossCanonicalData(value, "$.registered");
+  assertRecord(value);
+  if (expected === "boss") {
+    assertExactKeys(value, ["type", "registrationKind", "sessionId", "protocol", "version", "capabilities", "boss"]);
+    if (ownDataValue(value, "registrationKind") !== "boss") {
+      throw new ContractValidationError("$.registered.registrationKind", "must be boss");
+    }
+    const sessionId = ownDataValue(value, "sessionId");
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw new ContractValidationError("$.registered.sessionId", "must be a non-empty string");
+    }
+    const advertisement = parseBrokerCapabilityAdvertisement(ownDataValue(value, "capabilities"));
+    const expectedAdvertisement = bossCapabilityAdvertisement({
+      protectedProvider: true,
+      brokerIdentity: true,
+      credentialRegistry: true,
+      authorityTransitions: true,
+      participantHealth: true
+    });
+    const bossFeature = advertisement.features.find((feature) => feature.feature === BOSS_RUN_FEATURE);
+    if (bossFeature === void 0 || canonicalJson(bossFeature) !== canonicalJson(expectedAdvertisement.features[0]) || advertisement.baseProtocolVersion !== expectedAdvertisement.baseProtocolVersion || advertisement.protocolFeatureContractHash !== expectedAdvertisement.protocolFeatureContractHash || advertisement.controlEnvelopeVersion !== expectedAdvertisement.controlEnvelopeVersion || advertisement.capabilityDigest !== expectedAdvertisement.capabilityDigest) throw new ContractValidationError("$.registered.capabilities", "must exactly echo the requested boss-run-v1 contract");
+    parseBossParticipantBindingMetadata(ownDataValue(value, "boss"), sessionId);
+  } else if (expected === "ordinary-remote") {
+    assertExactKeys(value, ["type", "sessionId", "protocol", "version", "remoteAccess", "access"]);
+  } else {
+    assertExactKeys(value, ["type", "sessionId", "protocol", "version"]);
+  }
+  if (ownDataValue(value, "type") !== "registered") {
+    throw new ContractValidationError("$.registered.type", "must be registered");
+  }
+  return value;
+}
+function parseBossParticipantBindingMetadata(value, expectedSessionId) {
+  assertBossCanonicalData(value);
+  assertRecord(value);
+  assertExactKeys(
+    value,
+    ["featureContract", "binding", "brokerIdentityVerified"],
+    ["assignedParticipantIds", "requestingPrincipalId", "workerIdentity", "participantState"]
+  );
+  const featureContract = parseBossRunFeatureContract(ownDataValue(value, "featureContract"));
+  if (featureContract.baseProtocolVersion !== INTERCOM_BASE_PROTOCOL_VERSION || canonicalJson(featureContract) !== canonicalJson(BOSS_RUN_FEATURE_CONTRACT)) {
+    throw new ContractValidationError("$.featureContract", "must exactly bind boss-run-v1 over base protocol v3");
+  }
+  const binding = parseBossParticipantBinding(ownDataValue(value, "binding"));
+  if (ownDataValue(value, "brokerIdentityVerified") !== true) {
+    throw new ContractValidationError("$.brokerIdentityVerified", "must be true for a broker-owned Boss binding");
+  }
+  if (expectedSessionId !== void 0 && binding.sessionId !== expectedSessionId) {
+    throw new ContractValidationError("$.binding.sessionId", "must match the registered intercom session");
+  }
+  const rawAssignedParticipantIds = optionalOwnDataValue(value, "assignedParticipantIds");
+  let assignedParticipantIds;
+  if (rawAssignedParticipantIds !== void 0) {
+    if (binding.role !== "manager" || !Array.isArray(rawAssignedParticipantIds) || rawAssignedParticipantIds.some((entry) => typeof entry !== "string" || entry.length === 0) || new Set(rawAssignedParticipantIds).size !== rawAssignedParticipantIds.length) {
+      throw new ContractValidationError("$.assignedParticipantIds", "must be a unique participant list present only for a Manager");
+    }
+    assignedParticipantIds = rawAssignedParticipantIds;
+  }
+  if (binding.role === "manager" && assignedParticipantIds === void 0) {
+    throw new ContractValidationError("$.assignedParticipantIds", "is required for a Manager policy binding");
+  }
+  const rawRequestingPrincipalId = optionalOwnDataValue(value, "requestingPrincipalId");
+  if (binding.role === "council" !== (typeof rawRequestingPrincipalId === "string" && rawRequestingPrincipalId.length > 0)) {
+    throw new ContractValidationError("$.requestingPrincipalId", "is required exactly for a Council policy binding");
+  }
+  const requestingPrincipalId = typeof rawRequestingPrincipalId === "string" ? rawRequestingPrincipalId : void 0;
+  const rawWorkerIdentity = optionalOwnDataValue(value, "workerIdentity");
+  const rawParticipantState = optionalOwnDataValue(value, "participantState");
+  if (rawWorkerIdentity === void 0 !== (rawParticipantState === void 0)) {
+    throw new ContractValidationError("$.workerIdentity", "workerIdentity and participantState must be supplied together");
+  }
+  const workerIdentity = rawWorkerIdentity === void 0 ? void 0 : parseWorkerIdentityV2(rawWorkerIdentity);
+  const participantState = rawParticipantState === void 0 ? void 0 : parseParticipantState(rawParticipantState, "$.participantState");
+  if (workerIdentity !== void 0 && (!("bossRunId" in workerIdentity) || workerIdentity.bossRunId !== binding.bossRunId || workerIdentity.participantId !== binding.participantId || workerIdentity.bindingEpoch !== binding.bindingEpoch)) throw new ContractValidationError("$.workerIdentity", "must match the broker-owned participant binding");
+  return {
+    featureContract,
+    binding,
+    brokerIdentityVerified: true,
+    ...assignedParticipantIds === void 0 ? {} : { assignedParticipantIds: [...assignedParticipantIds] },
+    ...requestingPrincipalId === void 0 ? {} : { requestingPrincipalId },
+    ...workerIdentity === void 0 ? {} : { workerIdentity, participantState }
+  };
+}
+var BOSS_CONTROL_KIND_BY_TYPE = {
+  "boss.assignment.created": "assignment_request",
+  "boss.assignment.accepted": "assignment_response",
+  "boss.assignment.checkpoint": "assignment_response",
+  "boss.assignment.submitted": "assignment_response",
+  "boss.assignment.rejected": "assignment_response",
+  "boss.assignment.cancelled": "lifecycle",
+  "boss.staffing.requested": "staffing",
+  "boss.staffing.resolved": "staffing",
+  "boss.review.requested": "review_request",
+  "boss.review.submitted": "review_result",
+  "boss.council.requested": "review_request",
+  "boss.council.submitted": "review_result",
+  "boss.proof.submitted": "proof",
+  "boss.worker.health": "health",
+  "boss.worker.blocked": "health",
+  "boss.worker.failed": "health",
+  "boss.worker.notice": "lifecycle",
+  "boss.worker.notice_delivery_failed": "lifecycle",
+  "boss.decision.required": "decision"
+};
+function bossControlKind(envelopeValue) {
+  assertBossCanonicalData(envelopeValue);
+  const envelope = parseBossControlEnvelope(envelopeValue);
+  return { envelope, controlKind: BOSS_CONTROL_KIND_BY_TYPE[envelope.type] };
+}
+
 // codex/bridge-config.ts
 var DEFAULT_BRIDGE_CONFIG_PATH = join2(getIntercomDirPath(), "codex-bridge.json");
 var DEFAULT_BRIDGE_STATE_PATH = join2(getIntercomDirPath(), "codex-bridge-state.json");
 function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === "object" && value !== null && !Array.isArray(value) && !nodeUtilTypes2.isProxy(value);
 }
 function optionalString(value, field) {
   if (value === void 0 || value === null) return void 0;
@@ -572,11 +901,126 @@ function requireString(value, field) {
   if (!result) throw new Error(`${field} must be a non-empty string`);
   return result;
 }
+function parseHardenedBossClientKind(value, field) {
+  if (value === void 0 || value === null) return void 0;
+  if (value === "boss_participant" || value === "boss_reviewer") return value;
+  throw new Error(`${field} must be boss_participant or boss_reviewer`);
+}
+function sandboxType(value) {
+  if (!isRecord(value)) return void 0;
+  return typeof value.type === "string" ? value.type : void 0;
+}
+function assertHardenedBossAgentConfig(agent) {
+  if (nodeUtilTypes2.isProxy(agent)) throw new Error("Hardened Boss agent config must not be a proxy");
+  assertBossCanonicalData(agent, "$.agent");
+  if (agent.bossClient === void 0) return;
+  if (agent.sandboxPolicy !== void 0 && !isRecord(agent.sandboxPolicy)) {
+    throw new Error(`${agent.bossClient} sandboxPolicy must be a plain object`);
+  }
+  if (agent.approvalPolicy !== void 0 && typeof agent.approvalPolicy !== "string") {
+    throw new Error(`${agent.bossClient} approvalPolicy must be a string`);
+  }
+  const type = sandboxType(agent.sandboxPolicy);
+  if (type === "dangerFullAccess" || type === "danger-full-access") {
+    throw new Error(`${agent.bossClient} cannot use danger-full-access`);
+  }
+  if (agent.approvalPolicy === "never") {
+    throw new Error(`${agent.bossClient} cannot disable approval checks`);
+  }
+  if (agent.bossClient === "boss_reviewer" && type !== void 0 && type !== "readOnly" && type !== "read-only") {
+    throw new Error("boss_reviewer must use a read-only sandbox");
+  }
+  const canonicalCwd = resolve2(agent.cwd);
+  if (agent.bossClient === "boss_participant" && canonicalCwd === parsePath(canonicalCwd).root) {
+    throw new Error("boss_participant workspace root must not be a filesystem root");
+  }
+  if (isRecord(agent.sandboxPolicy)) {
+    assertBossCanonicalData(agent.sandboxPolicy, "$.agent.sandboxPolicy");
+    const allowedKeys = type === "workspaceWrite" || type === "workspace-write" ? /* @__PURE__ */ new Set(["type", "writableRoots", "networkAccess"]) : /* @__PURE__ */ new Set(["type", "networkAccess"]);
+    const keys = Reflect.ownKeys(agent.sandboxPolicy);
+    if (keys.some((key) => typeof key !== "string" || !allowedKeys.has(key))) {
+      throw new Error(`${agent.bossClient} sandboxPolicy contains unsupported capability fields`);
+    }
+    if (agent.sandboxPolicy.networkAccess !== false) {
+      throw new Error(`${agent.bossClient} networkAccess must be false`);
+    }
+    if (type !== "readOnly" && type !== "read-only" && type !== "workspaceWrite" && type !== "workspace-write") {
+      throw new Error(`${agent.bossClient} sandboxPolicy type is unsupported`);
+    }
+  }
+  if (isRecord(agent.sandboxPolicy) && (type === "workspaceWrite" || type === "workspace-write")) {
+    const roots = agent.sandboxPolicy.writableRoots;
+    assertBossCanonicalData(roots, "$.agent.sandboxPolicy.writableRoots");
+    if (!Array.isArray(roots) || nodeUtilTypes2.isProxy(roots) || roots.some((root) => typeof root !== "string")) {
+      throw new Error(`${agent.bossClient} writableRoots must be a dense string array`);
+    }
+    if (agent.bossClient === "boss_reviewer" || roots.length !== 1 || resolve2(roots[0]) !== canonicalCwd) {
+      throw new Error(`${agent.bossClient} writable roots must be restricted to the agent cwd`);
+    }
+  }
+  if (agent.bossClient === "boss_participant") {
+    throw new Error("boss_participant requires unavailable broker-owned assigned workspace authority");
+  }
+}
+function bridgeAgentApprovalPolicy(agent) {
+  return agent.approvalPolicy ?? (agent.bossClient === void 0 ? "never" : HARDENED_BOSS_CODEX_DEFAULTS[agent.bossClient].approvalPolicy);
+}
+function bridgeAgentDefaultSandbox(agent) {
+  return agent.bossClient === void 0 ? void 0 : HARDENED_BOSS_CODEX_DEFAULTS[agent.bossClient].sandbox;
+}
+function assertHardenedBossBridgeConfig(config) {
+  assertBossCanonicalData(config, "$.bridgeConfig");
+  if (nodeUtilTypes2.isProxy(config) || nodeUtilTypes2.isProxy(config.agents) || !Array.isArray(config.agents)) {
+    throw new Error("Bridge config and agents must be plain non-proxy data");
+  }
+  for (let index = 0; index < config.agents.length; index += 1) {
+    if (!Object.hasOwn(config.agents, index)) throw new Error("Bridge agents must not be sparse");
+    const agent = config.agents[index];
+    if (typeof agent !== "object" || agent === null || Array.isArray(agent) || nodeUtilTypes2.isProxy(agent)) {
+      throw new Error("Bridge agents must be plain non-proxy objects");
+    }
+  }
+  if (!config.agents.some((agent) => agent.bossClient !== void 0)) return;
+  if (config.appServer !== void 0) {
+    assertBossCanonicalData(config.appServer, "$.appServer");
+    if (nodeUtilTypes2.isProxy(config.appServer)) throw new Error("Hardened Boss app-server config must not be a proxy");
+    if (config.appServer.command !== void 0 || config.appServer.startDaemonCommand !== void 0) {
+      throw new Error("Hardened Boss bridge cannot use caller-provided app-server commands");
+    }
+  }
+  for (const args of [config.appServer?.args, config.appServer?.startDaemonArgs]) {
+    if (!args) continue;
+    assertBossCanonicalData(args, "$.appServer.argv");
+    if (nodeUtilTypes2.isProxy(args) || args.some((arg) => typeof arg !== "string")) throw new Error("Hardened Boss bridge arguments must be dense string arrays");
+    for (const arg of args) {
+      if (arg === "--") {
+        continue;
+      }
+      if (arg.length > 2 && arg.startsWith("-C")) {
+        throw new Error("Hardened Boss bridge cannot pass launch escape -C to app-server");
+      }
+      const optionName = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+      if (["-c", "--config", "-p", "--profile", "--enable", "--disable"].includes(optionName) || optionName.startsWith("-c") && optionName !== "-C" || optionName.startsWith("-p")) {
+        throw new Error(`Hardened Boss bridge cannot pass raw ${optionName} or profile configuration to app-server`);
+      }
+      if (["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--yolo", "--add-dir", "--cd", "-C"].includes(optionName)) {
+        throw new Error(`Hardened Boss bridge cannot pass launch escape ${optionName} to app-server`);
+      }
+      if (["--sandbox", "--ask-for-approval"].includes(optionName) || optionName === "-s" || optionName === "-a" || optionName.startsWith("-s") || optionName.startsWith("-a")) {
+        throw new Error(`Hardened Boss bridge cannot pass policy override ${optionName} to app-server`);
+      }
+      if (optionName.startsWith("-") && /(?:yolo|danger|bypass)/i.test(optionName)) {
+        throw new Error(`Hardened Boss bridge cannot pass launch escape ${optionName} to app-server`);
+      }
+    }
+  }
+  for (const agent of config.agents) assertHardenedBossAgentConfig(agent);
+}
 function normalizeAgent(raw, index) {
   if (!isRecord(raw)) throw new Error(`agents[${index}] must be an object`);
   const id = requireString(raw.id, `agents[${index}].id`);
   const name = optionalString(raw.name, `agents[${index}].name`) ?? id;
-  return {
+  const agent = {
     id,
     name,
     cwd: resolve2(optionalString(raw.cwd, `agents[${index}].cwd`) ?? processCwd()),
@@ -584,20 +1028,27 @@ function normalizeAgent(raw, index) {
     threadId: optionalString(raw.threadId, `agents[${index}].threadId`),
     instructions: optionalString(raw.instructions, `agents[${index}].instructions`),
     approvalPolicy: raw.approvalPolicy,
-    sandboxPolicy: raw.sandboxPolicy
+    sandboxPolicy: raw.sandboxPolicy,
+    bossClient: parseHardenedBossClientKind(raw.bossClient, `agents[${index}].bossClient`)
   };
+  assertHardenedBossAgentConfig(agent);
+  return agent;
 }
 function defaultBridgeConfig(env = process.env) {
   const id = env.CODEX_INTERCOM_BRIDGE_ID?.trim() || "codex-worker";
+  const bossClient = parseHardenedBossClientKind(env.CODEX_INTERCOM_BOSS_CLIENT?.trim(), "CODEX_INTERCOM_BOSS_CLIENT");
+  const agent = {
+    id,
+    name: env.CODEX_INTERCOM_BRIDGE_NAME?.trim() || id,
+    cwd: resolve2(env.CODEX_INTERCOM_BRIDGE_CWD?.trim() || processCwd()),
+    model: env.CODEX_INTERCOM_BRIDGE_MODEL?.trim() || void 0,
+    instructions: env.CODEX_INTERCOM_BRIDGE_INSTRUCTIONS?.trim() || void 0,
+    ...bossClient === void 0 ? {} : { bossClient }
+  };
+  assertHardenedBossAgentConfig(agent);
   return {
     statePath: env.CODEX_INTERCOM_BRIDGE_STATE?.trim() || DEFAULT_BRIDGE_STATE_PATH,
-    agents: [{
-      id,
-      name: env.CODEX_INTERCOM_BRIDGE_NAME?.trim() || id,
-      cwd: resolve2(env.CODEX_INTERCOM_BRIDGE_CWD?.trim() || processCwd()),
-      model: env.CODEX_INTERCOM_BRIDGE_MODEL?.trim() || void 0,
-      instructions: env.CODEX_INTERCOM_BRIDGE_INSTRUCTIONS?.trim() || void 0
-    }]
+    agents: [agent]
   };
 }
 function loadBridgeConfig(path = process.env.CODEX_INTERCOM_BRIDGE_CONFIG || DEFAULT_BRIDGE_CONFIG_PATH) {
@@ -645,166 +1096,11 @@ function saveBridgeState(path, state) {
 import { EventEmitter as EventEmitter2 } from "events";
 import net2 from "net";
 import { randomUUID as randomUUID2 } from "crypto";
-
-// ../../src/github.com/dataforxyz/agent-intercom-codex/node_modules/@dataforxyz/agent-intercom-core/dist/policy.js
-var POLICY_SEMANTICS_VERSION = 2;
-
-// ../../src/github.com/dataforxyz/agent-intercom-codex/node_modules/@dataforxyz/agent-intercom-core/dist/policy-vectors.js
-var localRoot = {
-  id: "local-root",
-  kind: "local",
-  state: "active",
-  generation: 1,
-  policy: "local-public",
-  rootSessionId: "local-root"
-};
-var localPeer = {
-  id: "local-peer",
-  kind: "local",
-  state: "active",
-  generation: 1,
-  policy: "local-public",
-  rootSessionId: "local-peer"
-};
-var remoteManager = {
-  id: "remote-manager",
-  kind: "remote",
-  state: "active",
-  generation: 1,
-  policy: "remote-tree",
-  parentSessionId: "local-root",
-  rootSessionId: "local-root"
-};
-var remoteChild = {
-  id: "remote-child",
-  kind: "remote",
-  state: "active",
-  generation: 1,
-  policy: "remote-tree",
-  parentSessionId: "remote-manager",
-  rootSessionId: "local-root"
-};
-var remoteSibling = {
-  id: "remote-sibling",
-  kind: "remote",
-  state: "active",
-  generation: 1,
-  policy: "remote-tree",
-  parentSessionId: "remote-manager",
-  rootSessionId: "local-root"
-};
-var POLICY_VECTORS = [
-  {
-    name: "local sessions remain public",
-    principals: [localRoot, localPeer],
-    actorId: "local-root",
-    action: "send",
-    targetId: "local-peer",
-    expectedAllowed: true,
-    expectedReasonOrCode: "local-public"
-  },
-  {
-    name: "remote manager can reach direct local parent",
-    principals: [localRoot, remoteManager],
-    actorId: "remote-manager",
-    action: "send",
-    targetId: "local-root",
-    expectedAllowed: true,
-    expectedReasonOrCode: "direct-parent"
-  },
-  {
-    name: "local parent can reach direct remote child",
-    principals: [localRoot, remoteManager],
-    actorId: "local-root",
-    action: "ask",
-    targetId: "remote-manager",
-    expectedAllowed: true,
-    expectedReasonOrCode: "direct-parent"
-  },
-  {
-    name: "remote child can reach its local root through the ancestor chain",
-    principals: [localRoot, remoteManager, remoteChild],
-    actorId: "remote-child",
-    action: "send",
-    targetId: "local-root",
-    expectedAllowed: true,
-    expectedReasonOrCode: "ancestor-chain"
-  },
-  {
-    name: "remote siblings cannot communicate in phase one",
-    principals: [localRoot, remoteManager, remoteChild, remoteSibling],
-    actorId: "remote-child",
-    action: "discover",
-    targetId: "remote-sibling",
-    expectedAllowed: false,
-    expectedReasonOrCode: "POLICY_DENIED"
-  },
-  {
-    name: "unrelated local session cannot discover remote principal",
-    principals: [localRoot, localPeer, remoteManager],
-    actorId: "local-peer",
-    action: "discover",
-    targetId: "remote-manager",
-    expectedAllowed: false,
-    expectedReasonOrCode: "POLICY_DENIED"
-  },
-  {
-    name: "remote principal cannot reach unrelated local session",
-    principals: [localRoot, localPeer, remoteManager],
-    actorId: "remote-manager",
-    action: "send",
-    targetId: "local-peer",
-    expectedAllowed: false,
-    expectedReasonOrCode: "POLICY_DENIED"
-  },
-  {
-    name: "remote manager may inspect its descendant subtree",
-    principals: [localRoot, remoteManager, remoteChild],
-    actorId: "remote-manager",
-    action: "inspect_tree",
-    targetId: "remote-child",
-    expectedAllowed: true,
-    expectedReasonOrCode: "ancestor-control"
-  },
-  {
-    name: "remote child cannot revoke its ancestor",
-    principals: [localRoot, remoteManager, remoteChild],
-    actorId: "remote-child",
-    action: "revoke",
-    targetId: "remote-manager",
-    expectedAllowed: false,
-    expectedReasonOrCode: "POLICY_DENIED"
-  },
-  {
-    name: "remote principal may request attenuated delegation under itself",
-    principals: [localRoot, remoteManager],
-    actorId: "remote-manager",
-    action: "delegate_child",
-    targetId: "remote-manager",
-    expectedAllowed: true,
-    expectedReasonOrCode: "self"
-  },
-  {
-    name: "revoked principal cannot communicate",
-    principals: [localRoot, { ...remoteManager, state: "revoked" }],
-    actorId: "remote-manager",
-    action: "send",
-    targetId: "local-root",
-    expectedAllowed: false,
-    expectedReasonOrCode: "REVOKED_PRINCIPAL"
-  },
-  {
-    name: "stale actor generation cannot send",
-    principals: [localRoot, { ...remoteManager, generation: 2 }],
-    actorId: "remote-manager",
-    action: "send",
-    targetId: "local-root",
-    context: { actorGeneration: 1 },
-    expectedAllowed: false,
-    expectedReasonOrCode: "STALE_GENERATION"
-  }
-];
-var POLICY_SEMANTICS_HASH = "f3b00e503631bc91123aedfbcf1df72cc9913e1893c09728b2c598f3dcdfdfe0";
+import { POLICY_SEMANTICS_HASH, POLICY_SEMANTICS_VERSION } from "@dataforxyz/agent-intercom-core";
+import {
+  BOSS_RUN_FEATURE as BOSS_RUN_FEATURE2,
+  parseBrokerCapabilityAdvertisement as parseBrokerCapabilityAdvertisement2
+} from "@dataforxyz/agent-intercom-core/boss";
 
 // broker/framing.ts
 var MAX_FRAME_BYTES = 1024 * 1024;
@@ -985,8 +1281,159 @@ var PersistentOutboundOutbox = class {
   }
 };
 
+// boss-control-outbox.ts
+import { createHash as createHash3 } from "node:crypto";
+import { chmodSync as chmodSync3, existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4, renameSync as renameSync3 } from "node:fs";
+import { join as join4 } from "node:path";
+import { canonicalHash } from "@dataforxyz/agent-intercom-core/canonical";
+import { parseBossControlEnvelope as parseBossControlEnvelope2 } from "@dataforxyz/agent-intercom-core/boss";
+var BOSS_CONTROL_OUTBOX_VERSION = 2;
+var MAX_BOSS_CONTROL_OUTBOX_ENTRIES = 256;
+function scope(envelope) {
+  return canonicalHash("agent-intercom-codex/boss-control/outbox-scope/v1", {
+    bossRunId: envelope.bossRunId,
+    participantId: envelope.participantId,
+    bindingEpoch: Number(envelope.bindingEpoch),
+    idempotencyKey: envelope.idempotencyKey
+  });
+}
+function fingerprint2(to, envelope) {
+  const { messageId: _transportMessageId, ...stableEnvelope } = envelope;
+  return canonicalHash("agent-intercom-codex/boss-control/outbox-request/v1", { to, envelope: stableEnvelope });
+}
+function exactKeys(value, required, optional = []) {
+  const permitted = /* @__PURE__ */ new Set([...required, ...optional]);
+  const keys = Reflect.ownKeys(value);
+  return required.every((key) => Object.hasOwn(value, key)) && keys.every((key) => typeof key === "string" && permitted.has(key));
+}
+function parseEntry(value) {
+  assertBossCanonicalData(value, "$.bossControlOutbox.entries[]");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid Boss outbox entry");
+  const entry = value;
+  if (!exactKeys(entry, ["to", "envelope", "scope", "fingerprint", "queuedAt", "state"], ["deliveryId"])) {
+    throw new Error("Invalid Boss outbox entry fields");
+  }
+  if (typeof entry.to !== "string" || entry.to.length === 0 || typeof entry.scope !== "string" || !/^[a-f0-9]{64}$/.test(entry.scope) || typeof entry.fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(entry.fingerprint) || typeof entry.queuedAt !== "number" || !Number.isSafeInteger(entry.queuedAt) || entry.state !== "queued" && entry.state !== "accepted" || entry.state === "queued" && Object.hasOwn(entry, "deliveryId") || entry.state === "accepted" && (!Object.hasOwn(entry, "deliveryId") || typeof entry.deliveryId !== "string" || entry.deliveryId.length === 0)) throw new Error("Invalid Boss outbox entry binding");
+  const envelope = parseBossControlEnvelope2(entry.envelope);
+  if (entry.scope !== scope(envelope) || entry.fingerprint !== fingerprint2(entry.to, envelope)) {
+    throw new Error("Boss outbox entry canonical binding mismatch");
+  }
+  return {
+    to: entry.to,
+    envelope,
+    scope: entry.scope,
+    fingerprint: entry.fingerprint,
+    queuedAt: entry.queuedAt,
+    state: entry.state,
+    ...entry.deliveryId === void 0 ? {} : { deliveryId: entry.deliveryId }
+  };
+}
+function fileName2(sessionId) {
+  return `${createHash3("sha256").update(sessionId).digest("hex")}.json`;
+}
+var PersistentBossControlOutbox = class {
+  path;
+  state;
+  constructor(sessionId, intercomDir = getIntercomDirPath()) {
+    ensureIntercomRuntimeDir(intercomDir);
+    const directory = join4(intercomDir, "boss-control-outbox");
+    mkdirSync4(directory, { recursive: true, mode: INTERCOM_DIR_MODE });
+    if (process.platform !== "win32") chmodSync3(directory, INTERCOM_DIR_MODE);
+    this.path = join4(directory, fileName2(sessionId));
+    this.state = this.load();
+  }
+  list() {
+    return structuredClone(this.state.entries);
+  }
+  find(idempotencyKey) {
+    const entry = this.state.entries.find((candidate) => candidate.envelope.idempotencyKey === idempotencyKey);
+    return entry === void 0 ? void 0 : structuredClone(entry);
+  }
+  enqueue(to, envelopeValue) {
+    if (typeof to !== "string" || to.length === 0) throw new Error("Boss target session ID is required");
+    assertBossCanonicalData(envelopeValue, "$.envelope");
+    const envelope = parseBossControlEnvelope2(envelopeValue);
+    const candidateScope = scope(envelope);
+    const candidateFingerprint = fingerprint2(to, envelope);
+    const existing = this.state.entries.find((entry) => entry.scope === candidateScope);
+    if (existing) {
+      if (existing.fingerprint !== candidateFingerprint) {
+        throw new Error(`Boss idempotency key ${envelope.idempotencyKey} is queued with a different canonical request`);
+      }
+      if (existing.envelope.messageId !== envelope.messageId) {
+        existing.envelope = envelope;
+        existing.queuedAt = Date.now();
+        this.persist();
+      }
+      return "existing";
+    }
+    if (this.state.entries.some((entry) => entry.envelope.messageId === envelope.messageId)) {
+      throw new Error(`Boss message ID ${envelope.messageId} is queued with a different idempotency scope`);
+    }
+    if (this.state.entries.length >= MAX_BOSS_CONTROL_OUTBOX_ENTRIES) throw new Error("Durable Boss control outbox is full");
+    this.state.entries.push({
+      to,
+      envelope,
+      scope: candidateScope,
+      fingerprint: candidateFingerprint,
+      queuedAt: Date.now(),
+      state: "queued"
+    });
+    this.persist();
+    return "added";
+  }
+  markAccepted(idempotencyKey, messageId, deliveryId) {
+    const entry = this.state.entries.find((candidate) => candidate.envelope.idempotencyKey === idempotencyKey);
+    if (!entry || entry.envelope.messageId !== messageId || !deliveryId) {
+      throw new Error("Boss acknowledgement does not match the durable outbox binding");
+    }
+    if (entry.state === "accepted") {
+      if (entry.deliveryId !== deliveryId) throw new Error("Boss acknowledgement changed the durable deliveryId");
+      return "already-accepted";
+    }
+    entry.state = "accepted";
+    entry.deliveryId = deliveryId;
+    this.persist();
+    return "accepted";
+  }
+  removeCorrelated(idempotencyKey, messageId, deliveryId) {
+    const index = this.state.entries.findIndex((candidate) => candidate.envelope.idempotencyKey === idempotencyKey);
+    if (index < 0) throw new Error("Boss terminal result has no durable outbox binding");
+    const entry = this.state.entries[index];
+    if (entry.envelope.messageId !== messageId) throw new Error("Boss terminal result messageId does not match the durable caller");
+    if (deliveryId === void 0) {
+      if (entry.state !== "queued") throw new Error("Boss post-acceptance failure omitted the durable deliveryId");
+    } else if (entry.state !== "accepted" || entry.deliveryId !== deliveryId) {
+      throw new Error("Boss terminal result arrived before the matching durable acknowledgement");
+    }
+    this.state.entries.splice(index, 1);
+    this.persist();
+  }
+  load() {
+    if (!existsSync3(this.path)) return { version: BOSS_CONTROL_OUTBOX_VERSION, entries: [] };
+    try {
+      const parsed = JSON.parse(readFileSync4(this.path, "utf8"));
+      assertBossCanonicalData(parsed, "$.bossControlOutbox");
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("expected object");
+      const state = parsed;
+      if (!exactKeys(state, ["version", "entries"]) || state.version !== BOSS_CONTROL_OUTBOX_VERSION || !Array.isArray(state.entries)) {
+        throw new Error("invalid Boss outbox state");
+      }
+      return { version: BOSS_CONTROL_OUTBOX_VERSION, entries: state.entries.map(parseEntry) };
+    } catch (error) {
+      const corruptPath = `${this.path}.corrupt-${Date.now()}`;
+      renameSync3(this.path, corruptPath);
+      restrictIntercomRuntimeFile(corruptPath);
+      throw new Error(`Boss control outbox was corrupt and quarantined at ${corruptPath}`, { cause: error });
+    }
+  }
+  persist() {
+    writeDurableJson(this.path, this.state);
+  }
+};
+
 // broker/access-credential.ts
-import { readFileSync as readFileSync4 } from "fs";
+import { readFileSync as readFileSync5 } from "fs";
 var ACCESS_CREDENTIAL_ENV = "AGENT_INTERCOM_ACCESS_CREDENTIAL_PATH";
 var ACCESS_CREDENTIAL_VERSION = 1;
 function nonEmptyString(value) {
@@ -995,7 +1442,7 @@ function nonEmptyString(value) {
 function loadRemoteAccessCredential(env = process.env) {
   const path = env[ACCESS_CREDENTIAL_ENV]?.trim();
   if (!path) return void 0;
-  const parsed = JSON.parse(readFileSync4(path, "utf8"));
+  const parsed = JSON.parse(readFileSync5(path, "utf8"));
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`Invalid Agent Intercom access credential at ${path}`);
   }
@@ -1028,7 +1475,49 @@ function writeRemoteSessionCredential(path, sessionId, metadata) {
   });
 }
 
+// broker/boss-control-ledger.ts
+import { canonicalJson as canonicalJson2 } from "@dataforxyz/agent-intercom-core/canonical";
+var BOSS_CONTROL_FAILURE_CODES = /* @__PURE__ */ new Set([
+  "INVALID_CONTROL",
+  "IDEMPOTENCY_CONFLICT",
+  "SESSION_NOT_FOUND",
+  "POLICY_DENIED",
+  "RECIPIENT_DISCONNECTED",
+  "DELIVERY_TIMEOUT"
+]);
+function exactStringKeys(value, required, optional = []) {
+  const keys = Reflect.ownKeys(value);
+  const permitted = /* @__PURE__ */ new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key)) && keys.every((key) => typeof key === "string" && permitted.has(key));
+}
+function parseBossControlResult(value) {
+  assertBossCanonicalData(value, "$.bossControlResult");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Boss control result must be an exact plain object");
+  }
+  const result = value;
+  const base = typeof result.requestId === "string" && result.requestId.length > 0 && result.messageId === result.requestId && typeof result.idempotencyKey === "string" && result.idempotencyKey.length > 0;
+  if (!base || result.type !== "boss_control_result") throw new Error("Invalid Boss control result binding");
+  if (result.status === "delivered" && result.delivered === true && typeof result.deliveryId === "string" && result.deliveryId.length > 0 && exactStringKeys(result, ["type", "requestId", "messageId", "idempotencyKey", "status", "delivered", "deliveryId"])) return result;
+  if (result.status === "rejected" && result.delivered === false && typeof result.code === "string" && BOSS_CONTROL_FAILURE_CODES.has(result.code) && typeof result.reason === "string" && result.reason.length > 0 && (!Object.hasOwn(result, "deliveryId") || typeof result.deliveryId === "string" && result.deliveryId.length > 0) && exactStringKeys(
+    result,
+    ["type", "requestId", "messageId", "idempotencyKey", "status", "delivered", "code", "reason"],
+    ["deliveryId"]
+  )) return result;
+  throw new Error("Invalid Boss control result discriminant");
+}
+function parseBossControlAck(value) {
+  assertBossCanonicalData(value, "$.bossControlAck");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Boss control acknowledgement must be an exact plain object");
+  }
+  const ack = value;
+  if (!exactStringKeys(ack, ["type", "requestId", "messageId", "idempotencyKey", "status", "deliveryId"]) || ack.type !== "boss_control_ack" || typeof ack.requestId !== "string" || ack.requestId.length === 0 || ack.messageId !== ack.requestId || typeof ack.idempotencyKey !== "string" || ack.idempotencyKey.length === 0 || ack.status !== "accepted" || typeof ack.deliveryId !== "string" || ack.deliveryId.length === 0) throw new Error("Invalid Boss control acknowledgement discriminant");
+  return ack;
+}
+
 // broker/client.ts
+import { types as nodeUtilTypes3 } from "node:util";
 function toError(error) {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -1098,6 +1587,13 @@ function isSessionInfo(value) {
   for (const field of ["depth", "maxDepth", "maxChildren"]) {
     if (session[field] !== void 0 && (typeof session[field] !== "number" || !Number.isSafeInteger(session[field]))) return false;
   }
+  if (session.boss !== void 0) {
+    try {
+      parseBossParticipantBindingMetadata(session.boss, session.id);
+    } catch {
+      return false;
+    }
+  }
   return true;
 }
 function isRemoteAccessMetadata(value) {
@@ -1111,8 +1607,12 @@ var IntercomClient = class extends EventEmitter2 {
   pendingSends = /* @__PURE__ */ new Map();
   pendingLists = /* @__PURE__ */ new Map();
   pendingAskControls = /* @__PURE__ */ new Map();
+  pendingBossControls = /* @__PURE__ */ new Map();
   outbox = null;
+  bossControlOutbox = null;
   remoteAccessCredential;
+  requestedBossRegistration;
+  _bossBinding;
   disconnecting = false;
   disconnectError = null;
   failPending(error) {
@@ -1129,12 +1629,23 @@ var IntercomClient = class extends EventEmitter2 {
       pending.resolve(false);
     }
     this.pendingAskControls.clear();
+    for (const pending of this.pendingBossControls.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    this.pendingBossControls.clear();
   }
   get sessionId() {
     return this._sessionId;
   }
   get outboxSize() {
     return this.outbox?.list().length ?? 0;
+  }
+  get bossBinding() {
+    return this._bossBinding;
+  }
+  get bossControlOutboxSize() {
+    return this.bossControlOutbox?.list().length ?? 0;
   }
   isConnected() {
     const socket = this.socket;
@@ -1156,6 +1667,19 @@ var IntercomClient = class extends EventEmitter2 {
   connect(session, sessionId) {
     if (this.socket) {
       return Promise.reject(new Error("Already connected"));
+    }
+    try {
+      const canonicalSession = parseExactRegistrationFrame({
+        type: "register",
+        ...typeof session === "object" && session !== null && !nodeUtilTypes3.isProxy(session) && Object.getOwnPropertyDescriptor(session, "boss") !== void 0 ? { registrationKind: "boss" } : {},
+        protocol: INTERCOM_PROTOCOL_NAME,
+        version: INTERCOM_PROTOCOL_VERSION,
+        session
+      }).session;
+      this.requestedBossRegistration = session.boss === void 0 ? void 0 : parseBossParticipantRegistrationMetadata(session.boss);
+      if (canonicalSession !== session) throw new Error("Registration session identity changed during validation");
+    } catch (error) {
+      return Promise.reject(toError(error));
     }
     return new Promise((resolve5, reject) => {
       let socket;
@@ -1211,6 +1735,8 @@ var IntercomClient = class extends EventEmitter2 {
           this.socket = null;
         }
         this._sessionId = null;
+        this._bossBinding = void 0;
+        this.requestedBossRegistration = void 0;
         this.disconnectError = null;
         if (connectionEstablished && !wasDisconnecting) {
           this.emit("disconnected", disconnectError);
@@ -1256,6 +1782,7 @@ var IntercomClient = class extends EventEmitter2 {
       try {
         writeMessage(socket, {
           type: "register",
+          ...session.boss === void 0 ? {} : { registrationKind: "boss" },
           protocol: INTERCOM_PROTOCOL_NAME,
           version: INTERCOM_PROTOCOL_VERSION,
           session,
@@ -1275,15 +1802,21 @@ var IntercomClient = class extends EventEmitter2 {
     });
   }
   handleBrokerMessage(msg) {
-    if (typeof msg !== "object" || msg === null || !("type" in msg) || typeof msg.type !== "string") {
+    if (typeof msg !== "object" || msg === null || nodeUtilTypes3.isProxy(msg)) {
       throw new Error("Invalid broker message");
     }
+    const typeDescriptor = Object.getOwnPropertyDescriptor(msg, "type");
+    if (typeDescriptor === void 0 || !typeDescriptor.enumerable || !Object.hasOwn(typeDescriptor, "value") || typeof typeDescriptor.value !== "string") throw new Error("Invalid broker message");
     const brokerMessage = msg;
     if (this._sessionId === null && brokerMessage.type !== "registered" && brokerMessage.type !== "error") {
       throw new Error(`Received ${brokerMessage.type} before registered`);
     }
     switch (brokerMessage.type) {
       case "registered": {
+        parseExactRegisteredFrame(
+          brokerMessage,
+          this.requestedBossRegistration === void 0 ? this.remoteAccessCredential === void 0 ? "ordinary-local" : "ordinary-remote" : "boss"
+        );
         if (typeof brokerMessage.sessionId !== "string" || brokerMessage.protocol !== INTERCOM_PROTOCOL_NAME || brokerMessage.version !== INTERCOM_PROTOCOL_VERSION) {
           throw new Error("Invalid registered message");
         }
@@ -1308,9 +1841,28 @@ var IntercomClient = class extends EventEmitter2 {
             }
           }
         }
+        if (this.requestedBossRegistration !== void 0) {
+          if (brokerMessage.remoteAccess !== void 0 || brokerMessage.access !== void 0) {
+            throw new Error("Boss registration returned folded remote-access metadata");
+          }
+          const advertisement = parseBrokerCapabilityAdvertisement2(brokerMessage.capabilities);
+          if (!advertisement.features.some((feature) => feature.feature === BOSS_RUN_FEATURE2)) {
+            throw new Error("Broker did not echo the required boss-run-v1 feature contract");
+          }
+          const binding = parseBossParticipantBindingMetadata(brokerMessage.boss, brokerMessage.sessionId);
+          const credential = this.requestedBossRegistration.credential;
+          if (binding.featureContract.feature !== this.requestedBossRegistration.featureContract.feature || binding.binding.bossRunId !== credential.bossRunId || binding.binding.participantId !== credential.participantId || binding.binding.role !== credential.role || binding.binding.communicationProfile !== credential.communicationProfile || binding.binding.bindingEpoch !== credential.bindingEpoch) {
+            throw new Error("Broker returned a Boss binding that does not match the authenticated registration request");
+          }
+          this._bossBinding = binding;
+        } else if (brokerMessage.boss !== void 0) {
+          throw new Error("Broker attached unsolicited Boss binding metadata to an ordinary registration");
+        }
         this._sessionId = brokerMessage.sessionId;
         this.outbox = new PersistentOutboundOutbox(brokerMessage.sessionId);
+        this.bossControlOutbox = this._bossBinding === void 0 ? null : new PersistentBossControlOutbox(brokerMessage.sessionId);
         this.replayOutbox();
+        this.replayBossControlOutbox();
         this.emit("_registered", { type: "registered", sessionId: brokerMessage.sessionId });
         break;
       }
@@ -1333,6 +1885,48 @@ var IntercomClient = class extends EventEmitter2 {
           throw new Error("Invalid message event");
         }
         this.emit("message", from, message, deliveryId);
+        break;
+      }
+      case "boss_control": {
+        const { deliveryId, from } = brokerMessage;
+        if (typeof deliveryId !== "string" || !isSessionInfo(from)) {
+          throw new Error("Invalid boss_control event");
+        }
+        const envelope = bossControlKind(brokerMessage.envelope).envelope;
+        const source = from.boss === void 0 ? void 0 : parseBossParticipantBindingMetadata(from.boss, from.id).binding;
+        if (source === void 0 || source.state !== "active" || source.bossRunId !== envelope.bossRunId || source.participantId !== envelope.participantId || source.bindingEpoch !== envelope.bindingEpoch) throw new Error("Boss control event sender does not match its broker-owned binding");
+        this.emit("boss_control", from, envelope, deliveryId);
+        break;
+      }
+      case "boss_control_result": {
+        const result = parseBossControlResult(brokerMessage);
+        const { requestId, messageId, idempotencyKey, deliveryId } = result;
+        const stored = this.bossControlOutbox?.find(idempotencyKey);
+        if (!stored || stored.envelope.messageId !== requestId) throw new Error("Boss control result does not match the durable outbox binding");
+        const pending = this.pendingBossControls.get(requestId);
+        if (pending && (pending.messageId !== messageId || pending.idempotencyKey !== idempotencyKey)) {
+          throw new Error("Boss control result correlation does not match the pending request");
+        }
+        this.bossControlOutbox.removeCorrelated(idempotencyKey, messageId, deliveryId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pendingBossControls.delete(requestId);
+          pending.resolve(result);
+        }
+        break;
+      }
+      case "boss_control_ack": {
+        const { requestId, messageId, idempotencyKey, deliveryId } = parseBossControlAck(brokerMessage);
+        const pending = this.pendingBossControls.get(requestId);
+        if (pending && (pending.messageId !== messageId || pending.idempotencyKey !== idempotencyKey)) {
+          throw new Error("Boss control acknowledgement correlation does not match the pending request");
+        }
+        const transition = this.bossControlOutbox?.markAccepted(idempotencyKey, messageId, deliveryId);
+        if (transition === void 0) throw new Error("Boss control acknowledgement has no durable outbox");
+        if (pending?.deliveryId !== void 0 && pending.deliveryId !== deliveryId) {
+          throw new Error("Boss control acknowledgement changed the pending deliveryId");
+        }
+        if (pending) pending.deliveryId = deliveryId;
         break;
       }
       case "delivery_accepted": {
@@ -1585,6 +2179,64 @@ var IntercomClient = class extends EventEmitter2 {
       }
     });
   }
+  sendBossControl(to, envelopeValue) {
+    let socket;
+    try {
+      socket = this.requireActiveSocket();
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+    let envelope;
+    try {
+      envelope = bossControlKind(envelopeValue).envelope;
+      const binding = this._bossBinding?.binding;
+      if (binding === void 0 || binding.state !== "active" || envelope.bossRunId !== binding.bossRunId || envelope.participantId !== binding.participantId || envelope.bindingEpoch !== binding.bindingEpoch) throw new Error("Boss control envelope does not match this client's active participant binding");
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+    const requestId = envelope.messageId;
+    if (this.pendingBossControls.has(requestId)) {
+      return Promise.resolve({
+        requestId,
+        messageId: envelope.messageId,
+        idempotencyKey: envelope.idempotencyKey,
+        status: "rejected",
+        delivered: false,
+        code: "INVALID_CONTROL",
+        reason: "Boss requestId is already pending"
+      });
+    }
+    try {
+      if (!this.bossControlOutbox) throw new Error("Durable Boss control outbox is unavailable");
+      this.bossControlOutbox.enqueue(to, envelope);
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+    return new Promise((resolve5, reject) => {
+      const timeout = setTimeout(() => {
+        if (!this.pendingBossControls.delete(requestId)) return;
+        reject(new Error("Boss control delivery timeout"));
+      }, 1e4);
+      timeout.unref?.();
+      this.pendingBossControls.set(requestId, {
+        messageId: envelope.messageId,
+        idempotencyKey: envelope.idempotencyKey,
+        resolve: resolve5,
+        reject,
+        timeout
+      });
+      try {
+        writeMessage(socket, { type: "boss_control", requestId, to, envelope });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pendingBossControls.delete(requestId);
+        reject(toError(error));
+      }
+    });
+  }
+  acknowledgeBossControl(deliveryId, messageId, idempotencyKey) {
+    return this.writeControlMessage({ type: "boss_control_received", deliveryId, messageId, idempotencyKey });
+  }
   acknowledgeMessage(deliveryId) {
     return this.writeControlMessage({ type: "message_received", deliveryId });
   }
@@ -1640,6 +2292,22 @@ var IntercomClient = class extends EventEmitter2 {
       }
     }
   }
+  replayBossControlOutbox() {
+    const socket = this.socket;
+    if (!socket || socket.destroyed || !this._sessionId || !this.bossControlOutbox) return;
+    for (const entry of this.bossControlOutbox.list()) {
+      try {
+        writeMessage(socket, {
+          type: "boss_control",
+          requestId: entry.envelope.messageId,
+          to: entry.to,
+          envelope: entry.envelope
+        });
+      } catch {
+        return;
+      }
+    }
+  }
   updatePresence(updates) {
     if (this.disconnecting) {
       return;
@@ -1654,38 +2322,39 @@ var IntercomClient = class extends EventEmitter2 {
 
 // broker/spawn.ts
 import { spawn as spawn2 } from "child_process";
-import { existsSync as existsSync3, readFileSync as readFileSync5, unlinkSync, writeFileSync as writeFileSync3 } from "fs";
-import { join as join4, dirname as dirname3 } from "path";
+import { existsSync as existsSync4, readFileSync as readFileSync6, unlinkSync, writeFileSync as writeFileSync3 } from "fs";
+import { join as join5, dirname as dirname3 } from "path";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import net3 from "net";
 import { randomUUID as randomUUID3 } from "crypto";
+import { POLICY_SEMANTICS_HASH as POLICY_SEMANTICS_HASH2, POLICY_SEMANTICS_VERSION as POLICY_SEMANTICS_VERSION2 } from "@dataforxyz/agent-intercom-core";
 var INTERCOM_DIR = getIntercomDirPath();
-var EXTENSION_DIR = join4(dirname3(fileURLToPath(import.meta.url)), "..");
-var BROKER_PID = join4(INTERCOM_DIR, "broker.pid");
-var BROKER_SPAWN_LOCK = join4(INTERCOM_DIR, "broker.spawn.lock");
+var EXTENSION_DIR = join5(dirname3(fileURLToPath(import.meta.url)), "..");
+var BROKER_PID = join5(INTERCOM_DIR, "broker.pid");
+var BROKER_SPAWN_LOCK = join5(INTERCOM_DIR, "broker.spawn.lock");
 function sleep(ms) {
   return new Promise((resolve5) => setTimeout(resolve5, ms));
 }
 function getBrokerEntryPath(moduleUrl = import.meta.url) {
   const moduleDir = dirname3(fileURLToPath(moduleUrl));
-  const bundledBroker = join4(moduleDir, "broker.mjs");
-  return existsSync3(bundledBroker) ? bundledBroker : join4(moduleDir, "broker.ts");
+  const bundledBroker = join5(moduleDir, "broker.mjs");
+  return existsSync4(bundledBroker) ? bundledBroker : join5(moduleDir, "broker.ts");
 }
 function getTsxCliPath(extensionDir = EXTENSION_DIR) {
   try {
     const requireFromExtension = createRequire(import.meta.url);
     const tsxMain = requireFromExtension.resolve("tsx");
-    return join4(dirname3(tsxMain), "cli.mjs");
+    return join5(dirname3(tsxMain), "cli.mjs");
   } catch {
-    return join4(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
+    return join5(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
   }
 }
 function quoteWindowsArg(value) {
   return `"${value.replace(/"/g, '""')}"`;
 }
 function getWindowsHiddenLauncherPath(intercomDir = INTERCOM_DIR) {
-  return join4(intercomDir, "broker-launch.vbs");
+  return join5(intercomDir, "broker-launch.vbs");
 }
 function usesDefaultBrokerCommand(brokerCommand, brokerArgs) {
   return brokerCommand === "npx" && brokerArgs.length === 2 && brokerArgs[0] === "--no-install" && brokerArgs[1] === "tsx";
@@ -1713,7 +2382,7 @@ function isBrokerHealthOkMessage(message, requestId) {
   const remoteAccess = response.remoteAccess;
   if (typeof remoteAccess !== "object" || remoteAccess === null || Array.isArray(remoteAccess)) return false;
   const contract = remoteAccess;
-  return contract.feature === "remote-access-v1" && contract.policySemanticsVersion === POLICY_SEMANTICS_VERSION && contract.policySemanticsHash === POLICY_SEMANTICS_HASH;
+  return contract.feature === "remote-access-v1" && contract.policySemanticsVersion === POLICY_SEMANTICS_VERSION2 && contract.policySemanticsHash === POLICY_SEMANTICS_HASH2;
 }
 function writeWindowsHiddenLauncher(commandLine, launcherPath = getWindowsHiddenLauncherPath()) {
   ensureIntercomRuntimeDir(dirname3(launcherPath));
@@ -1819,10 +2488,10 @@ async function spawnBrokerIfNeeded(brokerCommand, brokerArgs) {
   }
 }
 async function stopBrokerProcess(pidFile = BROKER_PID, timeoutMs = 3e3) {
-  if (!existsSync3(pidFile)) return;
+  if (!existsSync4(pidFile)) return;
   let pid;
   try {
-    pid = Number.parseInt(readFileSync5(pidFile, "utf-8").trim(), 10);
+    pid = Number.parseInt(readFileSync6(pidFile, "utf-8").trim(), 10);
   } catch {
     return;
   }
@@ -1847,9 +2516,9 @@ async function isBrokerRunning() {
   if (await checkSocketConnectable()) {
     return true;
   }
-  if (!existsSync3(BROKER_PID)) return false;
+  if (!existsSync4(BROKER_PID)) return false;
   try {
-    const pid = parseInt(readFileSync5(BROKER_PID, "utf-8").trim(), 10);
+    const pid = parseInt(readFileSync6(BROKER_PID, "utf-8").trim(), 10);
     if (!Number.isFinite(pid)) return false;
     process.kill(pid, 0);
     return checkSocketConnectable();
@@ -1946,11 +2615,11 @@ ${Date.now()}
   return false;
 }
 function isSpawnLockStale() {
-  if (!existsSync3(BROKER_SPAWN_LOCK)) {
+  if (!existsSync4(BROKER_SPAWN_LOCK)) {
     return false;
   }
   try {
-    const [pidLine = "", createdAtLine = "0"] = readFileSync5(BROKER_SPAWN_LOCK, "utf-8").trim().split("\n");
+    const [pidLine = "", createdAtLine = "0"] = readFileSync6(BROKER_SPAWN_LOCK, "utf-8").trim().split("\n");
     const pid = Number.parseInt(pidLine, 10);
     const createdAt = Number.parseInt(createdAtLine, 10);
     const ageMs = Date.now() - createdAt;
@@ -1984,8 +2653,8 @@ async function waitForBroker(timeoutMs = 5e3) {
 }
 
 // config.ts
-import { existsSync as existsSync4, readFileSync as readFileSync6 } from "fs";
-import { join as join5, resolve as resolve3 } from "path";
+import { existsSync as existsSync5, readFileSync as readFileSync7 } from "fs";
+import { join as join6, resolve as resolve3 } from "path";
 import { homedir as homedir2 } from "os";
 var DEFAULT_ASK_TIMEOUT_MS = 45 * 1e3;
 var MAX_ASK_TIMEOUT_MS = 120 * 1e3;
@@ -1999,8 +2668,8 @@ function validateAskTimeoutMs(value, name = "timeout_ms") {
   return value;
 }
 function getConfigPath() {
-  const agentDir = process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join5(homedir2(), ".pi", "agent");
-  return join5(agentDir, "intercom", "config.json");
+  const agentDir = process.env.PI_CODING_AGENT_DIR ? resolve3(process.env.PI_CODING_AGENT_DIR) : join6(homedir2(), ".pi", "agent");
+  return join6(agentDir, "intercom", "config.json");
 }
 var defaults = {
   brokerCommand: "npx",
@@ -2017,11 +2686,11 @@ var defaults = {
 };
 function loadConfig() {
   const configPath = getConfigPath();
-  if (!existsSync4(configPath)) {
+  if (!existsSync5(configPath)) {
     return { ...defaults };
   }
   try {
-    const raw = readFileSync6(configPath, "utf-8");
+    const raw = readFileSync7(configPath, "utf-8");
     const parsed = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
       throw new Error("Config must be a JSON object");
@@ -2148,39 +2817,126 @@ async function resolveContactTarget(id, name, listSessions) {
 
 // codex/team.ts
 import { readFile } from "node:fs/promises";
-import { join as join6 } from "node:path";
-var LIVE_STATES = /* @__PURE__ */ new Set(["provisioning", "running", "idle", "needs_attention", "stopping"]);
+import { join as join7 } from "node:path";
+import {
+  BOSS_PARTICIPANT_ROLES,
+  parseParticipantState as parseParticipantState2,
+  parseWorkerIdentityV2 as parseWorkerIdentityV22,
+  workerIdentityFromEnvironment
+} from "@dataforxyz/agent-intercom-core/boss";
+var LEGACY_LIVE_STATES = /* @__PURE__ */ new Set(["provisioning", "running", "idle", "needs_attention", "stopping"]);
+var CANONICAL_LIVE_STATES = /* @__PURE__ */ new Set(["provisioning", "registering", "ready", "working", "waiting", "paused", "stalled", "blocked", "unreachable"]);
 var stringValue = (value) => typeof value === "string" && value.trim() ? value.trim() : void 0;
 var connectedTo = (sessions, target) => {
   const normalized = target.toLowerCase();
   return sessions.some((session) => session.id === target || session.name?.toLowerCase() === normalized);
 };
+function bossIdentityFromEnvironment(env) {
+  const bossKeys = ["AGENT_INTERCOM_BOSS_RUN_ID", "AGENT_INTERCOM_PARTICIPANT_ID", "AGENT_INTERCOM_BINDING_EPOCH"];
+  if (!bossKeys.some((key) => env[key] !== void 0)) return void 0;
+  const identity = workerIdentityFromEnvironment(env);
+  if (!("bossRunId" in identity)) throw new Error("Incomplete Boss worker identity cannot discover a team");
+  return identity;
+}
+function canonicalWorker(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("worker must be an object");
+  const worker = value;
+  const identity = parseWorkerIdentityV22({
+    version: "orc.worker-identity.v2",
+    workerId: worker.id,
+    workerIncarnationId: worker.workerIncarnationId,
+    workerGeneration: worker.workerGeneration,
+    ...worker.bossRunId === void 0 ? {} : { bossRunId: worker.bossRunId },
+    ...worker.participantId === void 0 ? {} : { participantId: worker.participantId },
+    ...worker.bindingEpoch === void 0 ? {} : { bindingEpoch: worker.bindingEpoch }
+  });
+  parseParticipantState2(worker.state, "$.worker.state");
+  if (typeof worker.role !== "string" || !BOSS_PARTICIPANT_ROLES.includes(worker.role)) {
+    throw new Error("worker role is not canonical");
+  }
+  if (worker.owned !== true || !stringValue(worker.managerSessionId) || !stringValue(worker.intercomTarget)) {
+    throw new Error("canonical worker ownership routing is incomplete");
+  }
+  return { ...worker, canonicalIdentity: identity };
+}
+function exactBossRosterSession(sessions, worker) {
+  const identity = worker.canonicalIdentity;
+  const target = stringValue(worker.intercomTarget);
+  const role = stringValue(worker.role);
+  const state = stringValue(worker.state);
+  if (!identity || !("bossRunId" in identity) || !target || !role || !state) return void 0;
+  const matches = sessions.filter((candidate) => candidate.id === target);
+  if (matches.length !== 1) return void 0;
+  const [session] = matches;
+  if (!session?.boss?.binding || session.boss.workerIdentity === void 0 || session.boss.participantState === void 0) return void 0;
+  try {
+    const sessionIdentity = parseWorkerIdentityV22(session.boss.workerIdentity);
+    const sessionState = parseParticipantState2(session.boss.participantState, "$.session.boss.participantState");
+    const binding = session.boss.binding;
+    return "bossRunId" in sessionIdentity && session.id === target && binding.sessionId === session.id && binding.state === "active" && binding.bossRunId === identity.bossRunId && binding.participantId === identity.participantId && binding.bindingEpoch === identity.bindingEpoch && binding.role === role && sessionIdentity.workerId === identity.workerId && sessionIdentity.workerIncarnationId === identity.workerIncarnationId && sessionIdentity.workerGeneration === identity.workerGeneration && sessionIdentity.bossRunId === identity.bossRunId && sessionIdentity.participantId === identity.participantId && sessionIdentity.bindingEpoch === identity.bindingEpoch && sessionState === state ? session : void 0;
+  } catch {
+    return void 0;
+  }
+}
 async function readWorkers(agentDir) {
   try {
-    const parsed = JSON.parse(await readFile(join6(agentDir, "intercom", "orchestrator", "workers.json"), "utf8"));
-    return Array.isArray(parsed.workers) ? parsed.workers : [];
+    const parsed = JSON.parse(await readFile(join7(agentDir, "intercom", "orchestrator", "workers.json"), "utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("worker snapshot must be an object");
+    const snapshot = parsed;
+    if (snapshot.version !== 1 && snapshot.version !== 2 || !Array.isArray(snapshot.workers)) throw new Error("unsupported worker snapshot version");
+    if (snapshot.version === 1) return { version: 1, workers: snapshot.workers };
+    return { version: 2, workers: snapshot.workers.map(canonicalWorker) };
   } catch {
-    return [];
+    return { version: 1, workers: [] };
   }
 }
 async function resolveIntercomTeam(input) {
   const env = input.env ?? process.env;
-  const workers = await readWorkers(input.agentDir ?? getAgentDirPath());
+  const snapshot = await readWorkers(input.agentDir ?? getAgentDirPath());
+  const workers = snapshot.workers;
   const workerId = stringValue(env.AGENT_INTERCOM_WORKER_ID);
+  const bossIdentity = bossIdentityFromEnvironment(env);
   const runId = stringValue(env.AGENT_INTERCOM_RUN_ID);
-  const current = workerId ? workers.find((worker) => stringValue(worker.id) === workerId && (!runId || stringValue(worker.runId) === runId)) : void 0;
-  const managerTarget = stringValue(current?.managerSessionId) ?? stringValue(env.AGENT_INTERCOM_MANAGER_TARGET) ?? stringValue(env.AGENT_INTERCOM_MANAGER_SESSION_ID);
+  const currentMatches = workerId ? workers.filter((worker) => stringValue(worker.id) === workerId && (bossIdentity === void 0 ? !runId || stringValue(worker.runId) === runId : snapshot.version === 2 && worker.canonicalIdentity?.workerId === bossIdentity.workerId && worker.canonicalIdentity.workerIncarnationId === bossIdentity.workerIncarnationId && worker.canonicalIdentity.workerGeneration === bossIdentity.workerGeneration && "bossRunId" in worker.canonicalIdentity && "bossRunId" in bossIdentity && worker.canonicalIdentity.bossRunId === bossIdentity.bossRunId && worker.canonicalIdentity.participantId === bossIdentity.participantId && worker.canonicalIdentity.bindingEpoch === bossIdentity.bindingEpoch)) : [];
+  const current = bossIdentity === void 0 ? currentMatches[0] : currentMatches.length === 1 ? currentMatches[0] : void 0;
+  const currentTarget = stringValue(current?.intercomTarget);
+  const exactCurrentProjection = current !== void 0 && currentTarget === input.selfId && workers.filter((worker) => stringValue(worker.id) === workerId).length === 1 && workers.filter((worker) => stringValue(worker.intercomTarget) === currentTarget).length === 1 && exactBossRosterSession(input.sessions, current) !== void 0;
+  if (bossIdentity !== void 0 && !exactCurrentProjection) {
+    return { self: { id: input.selfId, ...workerId ? { workerId } : {}, isManager: false }, coworkers: [] };
+  }
+  const managerTarget = stringValue(current?.managerSessionId) ?? (bossIdentity === void 0 ? stringValue(env.AGENT_INTERCOM_MANAGER_TARGET) ?? stringValue(env.AGENT_INTERCOM_MANAGER_SESSION_ID) : void 0);
   const teamId = managerTarget ?? input.selfId;
-  const coworkers = workers.filter((worker) => worker.owned === true).filter((worker) => stringValue(worker.managerSessionId) === teamId).filter((worker) => LIVE_STATES.has(stringValue(worker.state) ?? "")).filter((worker) => stringValue(worker.id) !== workerId).map((worker) => {
+  const currentRole = stringValue(current?.role);
+  const canDiscoverOwnedRoster = bossIdentity === void 0 || currentRole === "manager" || currentRole === "controller";
+  const coworkers = (canDiscoverOwnedRoster ? workers : []).filter((worker) => worker.owned === true).filter((worker) => bossIdentity === void 0 || snapshot.version === 2 && worker.canonicalIdentity !== void 0 && "bossRunId" in worker.canonicalIdentity && "bossRunId" in bossIdentity && worker.canonicalIdentity.bossRunId === bossIdentity.bossRunId).filter((worker) => stringValue(worker.managerSessionId) === teamId).filter((worker) => stringValue(worker.intercomTarget) !== managerTarget).filter((worker) => (snapshot.version === 2 ? CANONICAL_LIVE_STATES : LEGACY_LIVE_STATES).has(stringValue(worker.state) ?? "")).filter((worker) => stringValue(worker.id) !== workerId).map((worker) => {
     const id = stringValue(worker.id);
     if (!id) return void 0;
     const target = stringValue(worker.intercomTarget) ?? id;
-    return { id, target, ...stringValue(worker.harness) ? { harness: stringValue(worker.harness) } : {}, ...stringValue(worker.role) ? { role: stringValue(worker.role) } : {}, ...stringValue(worker.state) ? { state: stringValue(worker.state) } : {}, connected: connectedTo(input.sessions, target) };
+    const connected = bossIdentity === void 0 ? connectedTo(input.sessions, target) : exactBossRosterSession(input.sessions, worker) !== void 0;
+    if (!connected) return void 0;
+    return {
+      id,
+      target,
+      ...stringValue(worker.harness) ? { harness: stringValue(worker.harness) } : {},
+      ...stringValue(worker.role) ? { role: stringValue(worker.role) } : {},
+      ...stringValue(worker.state) ? { state: stringValue(worker.state) } : {},
+      connected
+    };
   }).filter((member) => Boolean(member));
-  return { teamId, self: { id: input.selfId, ...workerId ? { workerId } : {}, isManager: !managerTarget }, manager: managerTarget ? { target: managerTarget, connected: connectedTo(input.sessions, managerTarget) } : { target: input.selfId, connected: true }, coworkers };
+  const managerWorker = managerTarget === void 0 ? void 0 : workers.find((worker) => stringValue(worker.intercomTarget) === managerTarget && (bossIdentity === void 0 || snapshot.version === 2 && stringValue(worker.role) === "manager" && worker.canonicalIdentity !== void 0 && "bossRunId" in worker.canonicalIdentity && "bossRunId" in bossIdentity && worker.canonicalIdentity.bossRunId === bossIdentity.bossRunId));
+  const managerConnected = managerTarget === void 0 ? true : bossIdentity === void 0 ? connectedTo(input.sessions, managerTarget) : managerWorker !== void 0 && exactBossRosterSession(input.sessions, managerWorker) !== void 0;
+  return {
+    teamId,
+    self: { id: input.selfId, ...workerId ? { workerId } : {}, isManager: bossIdentity === void 0 && !managerTarget },
+    ...managerTarget ? { manager: { target: managerTarget, connected: managerConnected } } : bossIdentity === void 0 ? { manager: { target: input.selfId, connected: true } } : {},
+    coworkers
+  };
 }
 function formatIntercomTeam(team) {
-  const lines = [`Manager: ${team.manager ? `${team.manager.target} [${team.manager.connected ? "connected" : "not connected"}]` : "unknown"}`, `You: ${team.self.workerId ?? team.self.id}${team.self.isManager ? " [manager]" : ""}`];
+  const lines = [
+    `Manager: ${team.manager ? `${team.manager.target} [${team.manager.connected ? "connected" : "not connected"}]` : "unknown"}`,
+    `You: ${team.self.workerId ?? team.self.id}${team.self.isManager ? " [manager]" : ""}`
+  ];
   if (!team.coworkers.length) lines.push("Coworkers: none");
   else {
     lines.push("Coworkers:");
@@ -2323,6 +3079,25 @@ function threadSandboxMode(sandboxPolicy) {
     default:
       return "read-only";
   }
+}
+function protectedBossClientForBridge(config) {
+  assertBossCanonicalData(config, "$.bridgeConfig");
+  if (!Array.isArray(config.agents)) return void 0;
+  for (const agent of config.agents) {
+    if (typeof agent !== "object" || agent === null || Array.isArray(agent)) continue;
+    if (agent.bossClient === "boss_participant" || agent.bossClient === "boss_reviewer") return agent.bossClient;
+  }
+  return void 0;
+}
+function bridgeAgentSandboxMode(agent) {
+  return agent.sandboxPolicy === void 0 ? bridgeAgentDefaultSandbox(agent) ?? "read-only" : threadSandboxMode(agent.sandboxPolicy);
+}
+function bridgeAgentTurnSandboxPolicy(agent) {
+  if (agent.sandboxPolicy !== void 0) return agent.sandboxPolicy;
+  if (bridgeAgentSandboxMode(agent) === "workspace-write") {
+    throw new Error("workspace-write requires unavailable broker-owned assigned workspace authority");
+  }
+  return { type: "readOnly", networkAccess: false };
 }
 function getTurnId(result) {
   const turn = result && typeof result === "object" ? result.turn : void 0;
@@ -2607,12 +3382,12 @@ var VirtualCodexAgent = class {
   async ensureThread() {
     if (this.threadId) {
       try {
-        const sandbox2 = threadSandboxMode(this.agent.sandboxPolicy);
+        const sandbox2 = bridgeAgentSandboxMode(this.agent);
         await this.app.request("thread/resume", {
           threadId: this.threadId,
           cwd: this.agent.cwd,
           model: this.agent.model ?? null,
-          approvalPolicy: this.agent.approvalPolicy ?? "never",
+          approvalPolicy: bridgeAgentApprovalPolicy(this.agent),
           sandbox: sandbox2
         });
         return this.threadId;
@@ -2620,11 +3395,11 @@ var VirtualCodexAgent = class {
         this.threadId = null;
       }
     }
-    const sandbox = threadSandboxMode(this.agent.sandboxPolicy);
+    const sandbox = bridgeAgentSandboxMode(this.agent);
     const result = await this.app.request("thread/start", {
       cwd: this.agent.cwd,
       model: this.agent.model ?? null,
-      approvalPolicy: this.agent.approvalPolicy ?? "never",
+      approvalPolicy: bridgeAgentApprovalPolicy(this.agent),
       sandbox,
       serviceName: "codex-intercom",
       developerInstructions: this.agent.instructions ?? null,
@@ -2675,8 +3450,8 @@ var VirtualCodexAgent = class {
       threadId,
       input,
       cwd: this.agent.cwd,
-      approvalPolicy: this.agent.approvalPolicy ?? "never",
-      sandboxPolicy: this.agent.sandboxPolicy ?? { type: "readOnly", networkAccess: false },
+      approvalPolicy: bridgeAgentApprovalPolicy(this.agent),
+      sandboxPolicy: bridgeAgentTurnSandboxPolicy(this.agent),
       model: this.agent.model ?? null
     });
   }
@@ -2891,7 +3666,11 @@ var CodexBridgeDaemon = class {
   constructor(config, hooks = {}) {
     this.config = config;
     this.hooks = hooks;
-    this.app = new CodexAppServerClient(config.appServer);
+    const protectedBossClient = protectedBossClientForBridge(config);
+    assertHardenedBossProviderAuthority(protectedBossClient);
+    assertHardenedBossBridgeConfig(config);
+    for (const agent of config.agents) assertHardenedBossAgentConfig(agent);
+    this.app = new CodexAppServerClient(config.appServer, protectedBossClient);
     this.app.setServerRequestHandler((message) => this.handleServerRequest(message));
   }
   config;
@@ -2900,6 +3679,9 @@ var CodexBridgeDaemon = class {
   agents = [];
   inflightToolCalls = /* @__PURE__ */ new Map();
   async start() {
+    assertHardenedBossProviderAuthority(protectedBossClientForBridge(this.config));
+    assertHardenedBossBridgeConfig(this.config);
+    for (const agent of this.config.agents) assertHardenedBossAgentConfig(agent);
     const intercomConfig = loadConfig();
     await spawnBrokerIfNeeded(intercomConfig.brokerCommand, intercomConfig.brokerArgs);
     await this.app.connect();
@@ -3259,7 +4041,12 @@ var CODEX_OPTIONS_WITH_VALUE = /* @__PURE__ */ new Set([
 var COI_STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
 var MANAGED_MCP_ENV_KEYS = [
   "AGENT_INTERCOM_WORKER_ID",
+  "AGENT_INTERCOM_WORKER_INCARNATION_ID",
+  "AGENT_INTERCOM_WORKER_GENERATION",
   "AGENT_INTERCOM_RUN_ID",
+  "AGENT_INTERCOM_BOSS_RUN_ID",
+  "AGENT_INTERCOM_PARTICIPANT_ID",
+  "AGENT_INTERCOM_BINDING_EPOCH",
   "AGENT_INTERCOM_MANAGER_TARGET",
   "AGENT_INTERCOM_MANAGER_SESSION_ID",
   "AGENT_INTERCOM_SYSTEMD_UNIT",
@@ -3270,7 +4057,7 @@ function sanitizeSegment(value) {
   return value.replace(/[^a-zA-Z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "codex";
 }
 function shortHash(value) {
-  return createHash3("sha1").update(value).digest("hex").slice(0, 8);
+  return createHash4("sha1").update(value).digest("hex").slice(0, 8);
 }
 function gitString(cwd, args) {
   const result = spawnSync2("git", args, {
@@ -3337,26 +4124,27 @@ function deriveBridgeAgentRuntimeConfig(args, cwd) {
   let approvalPolicy;
   let sandboxMode;
   const writableRoots = /* @__PURE__ */ new Set([resolve4(cwd)]);
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
+  const { optionArgs } = splitCodexResumeArgs(args);
+  for (let index = 0; index < optionArgs.length; index += 1) {
+    const arg = optionArgs[index];
     const optionName = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
     switch (optionName) {
       case "--ask-for-approval":
       case "-a": {
-        const parsed = readCodexFlagValue(args, index, optionName);
+        const parsed = readCodexFlagValue(optionArgs, index, optionName);
         approvalPolicy = parsed.value;
         index = parsed.nextIndex;
         break;
       }
       case "--sandbox":
       case "-s": {
-        const parsed = readCodexFlagValue(args, index, optionName);
+        const parsed = readCodexFlagValue(optionArgs, index, optionName);
         sandboxMode = parsed.value;
         index = parsed.nextIndex;
         break;
       }
       case "--add-dir": {
-        const parsed = readCodexFlagValue(args, index, optionName);
+        const parsed = readCodexFlagValue(optionArgs, index, optionName);
         writableRoots.add(resolve4(cwd, parsed.value));
         index = parsed.nextIndex;
         break;
@@ -3370,12 +4158,78 @@ function deriveBridgeAgentRuntimeConfig(args, cwd) {
         break;
     }
   }
-  const sandboxType = sandboxMode ? camelSandboxType(sandboxMode) : void 0;
-  const sandboxPolicy = sandboxType === "workspaceWrite" ? { type: sandboxType, writableRoots: [...writableRoots], networkAccess: false } : sandboxType ? { type: sandboxType, ...sandboxType === "readOnly" ? { networkAccess: false } : {} } : void 0;
+  const sandboxType2 = sandboxMode ? camelSandboxType(sandboxMode) : void 0;
+  const sandboxPolicy = sandboxType2 === "workspaceWrite" ? { type: sandboxType2, writableRoots: [...writableRoots], networkAccess: false } : sandboxType2 ? { type: sandboxType2, ...sandboxType2 === "readOnly" ? { networkAccess: false } : {} } : void 0;
   return {
     ...approvalPolicy ? { approvalPolicy } : {},
     ...sandboxPolicy ? { sandboxPolicy } : {}
   };
+}
+var HARDENED_BOSS_RAW_CONFIG_OPTIONS = /* @__PURE__ */ new Set(["-c", "--config", "-p", "--profile", "--enable", "--disable"]);
+var HARDENED_BOSS_BYPASS_OPTIONS = /* @__PURE__ */ new Set([
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--dangerously-bypass-hook-trust",
+  "--yolo"
+]);
+function isHardenedBossRawConfigOption(optionName) {
+  return HARDENED_BOSS_RAW_CONFIG_OPTIONS.has(optionName) || optionName.startsWith("-c") && optionName !== "-C" || optionName.startsWith("-p");
+}
+function hardenedBossAttachedAuthorityOption(arg) {
+  if (arg.length <= 2) return void 0;
+  const option = arg.slice(0, 2);
+  return option === "-s" || option === "-a" || option === "-C" ? option : void 0;
+}
+function assertHardenedBossCoiLaunch(args, cwd, bossClient) {
+  if (bossClient !== void 0) {
+    assertBossCanonicalData(args, "$.argv");
+    if (!Array.isArray(args) || nodeUtilTypes4.isProxy(args) || args.some((arg) => typeof arg !== "string")) {
+      throw new Error(`${bossClient} arguments must be a plain dense string array`);
+    }
+  }
+  if (bossClient === void 0) return deriveBridgeAgentRuntimeConfig(args, cwd);
+  let afterSeparator = false;
+  for (const arg of args) {
+    if (arg === "--") {
+      afterSeparator = true;
+      continue;
+    }
+    const attachedAuthorityOption = hardenedBossAttachedAuthorityOption(arg);
+    if (attachedAuthorityOption === "-C") {
+      throw new Error(`${bossClient} cannot expand or replace its writable root`);
+    }
+    if (attachedAuthorityOption !== void 0) {
+      throw new Error(`${bossClient} cannot use attached ${attachedAuthorityOption} policy overrides`);
+    }
+    const optionName = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    if (isHardenedBossRawConfigOption(optionName)) {
+      throw new Error(`${bossClient} cannot use raw ${optionName} or profile configuration`);
+    }
+    if (HARDENED_BOSS_BYPASS_OPTIONS.has(optionName)) {
+      throw new Error(`${bossClient} cannot use approval or sandbox bypass aliases`);
+    }
+    if (optionName === "--add-dir" || optionName === "--cd" || optionName === "-C") {
+      throw new Error(`${bossClient} cannot expand or replace its writable root`);
+    }
+    if (afterSeparator && ["--sandbox", "-s", "--ask-for-approval", "-a"].includes(optionName)) {
+      throw new Error(`${bossClient} cannot place policy overrides after the argument separator`);
+    }
+    if (optionName.startsWith("-") && /(?:yolo|danger|bypass)/i.test(optionName)) {
+      throw new Error(`${bossClient} cannot use approval or sandbox bypass aliases`);
+    }
+  }
+  if (bossClient === "boss_participant") {
+    throw new Error("boss_participant requires unavailable broker-owned assigned workspace authority");
+  }
+  const runtime = deriveBridgeAgentRuntimeConfig(args, cwd);
+  const probe = {
+    id: "launch-validation",
+    name: "launch-validation",
+    cwd: resolve4(cwd),
+    bossClient,
+    ...runtime
+  };
+  assertHardenedBossAgentConfig(probe);
+  return runtime;
 }
 function parseCoiArgs(argv, env = process.env) {
   const codexArgs = [];
@@ -3389,6 +4243,7 @@ function parseCoiArgs(argv, env = process.env) {
     }
     if (arg === "--") {
       afterSeparator = true;
+      codexArgs.push(arg);
       continue;
     }
     const [key, inlineValue] = arg.includes("=") ? arg.split(/=(.*)/s, 2) : [arg, void 0];
@@ -3448,7 +4303,7 @@ function parseCoiArgs(argv, env = process.env) {
   };
 }
 function hasCodexHelpOrVersion(args) {
-  return args.some((arg) => arg === "--help" || arg === "-h" || arg === "--version" || arg === "-V");
+  return splitCodexResumeArgs(args).optionArgs.some((arg) => arg === "--help" || arg === "-h" || arg === "--version" || arg === "-V");
 }
 function splitCodexResumeArgs(args) {
   const optionArgs = [];
@@ -3458,7 +4313,7 @@ function splitCodexResumeArgs(args) {
     const arg = args[index];
     if (arg === "--") {
       promptArgs.push(...args.slice(index + 1));
-      return { optionArgs, promptArgs };
+      return { optionArgs, promptArgs, separatorPresent: true };
     }
     if (!arg.startsWith("-") || arg === "-") break;
     optionArgs.push(arg);
@@ -3469,15 +4324,16 @@ function splitCodexResumeArgs(args) {
     }
   }
   promptArgs.push(...args.slice(index));
-  return { optionArgs, promptArgs };
+  return { optionArgs, promptArgs, separatorPresent: false };
 }
 function resolveCoiResumeRequest(args) {
-  const { optionArgs, promptArgs } = splitCodexResumeArgs(args);
-  if (promptArgs[0] !== "resume" || !promptArgs[1]) return { optionArgs, promptArgs };
+  const { optionArgs, promptArgs, separatorPresent } = splitCodexResumeArgs(args);
+  if (separatorPresent || promptArgs[0] !== "resume" || !promptArgs[1]) return { optionArgs, promptArgs };
   return { optionArgs, threadId: promptArgs[1], promptArgs: promptArgs.slice(2) };
 }
 function buildCoiTuiArgs(remote, optionArgs, threadId, promptArgs, explicitResume) {
-  return explicitResume ? ["resume", "--remote", remote, ...optionArgs, threadId, ...promptArgs] : ["--remote", remote, ...optionArgs, ...promptArgs];
+  const promptTail = promptArgs.length === 0 ? [] : ["--", ...promptArgs];
+  return explicitResume ? ["resume", "--remote", remote, ...optionArgs, threadId, ...promptTail] : ["--remote", remote, ...optionArgs, ...promptTail];
 }
 function buildCodexAppServerArgs(args, socketPath, env = process.env) {
   const { optionArgs } = splitCodexResumeArgs(args);
@@ -3510,7 +4366,7 @@ async function waitForSocket(socketPath, proc, timeoutMs = 1e4) {
     if (proc.exitCode !== null) {
       throw new Error(`Codex app-server exited before creating ${socketPath}`);
     }
-    if (existsSync5(socketPath)) return;
+    if (existsSync6(socketPath)) return;
     await delay2(50);
   }
   throw new Error(`Timed out waiting for Codex app-server socket: ${socketPath}`);
@@ -3535,9 +4391,10 @@ function terminalNotification(message) {
   else process.stderr.write(`${safe}
 `);
 }
-async function runInteractiveTui(command, args, refreshArgs, cwd, onAltI, onAltM, installRefresh) {
+async function runInteractiveTui(command, args, refreshArgs, cwd, onAltI, onAltM, installRefresh, protectedBossClient, launchEnv = process.env) {
+  assertHardenedBossProviderAuthority(protectedBossClient);
   const runInherited = async () => {
-    const tui2 = spawn4(command, args, { cwd, env: process.env, stdio: "inherit" });
+    const tui2 = spawn4(command, args, { cwd, env: launchEnv, stdio: "inherit" });
     const [code, signal] = await once2(tui2, "exit");
     if (typeof code === "number") return code;
     return signal === "SIGINT" ? 130 : 1;
@@ -3554,11 +4411,11 @@ async function runInteractiveTui(command, args, refreshArgs, cwd, onAltI, onAltM
     return runInherited();
   }
   const tui = nodePty.spawn(command, args, {
-    name: process.env.TERM || "xterm-256color",
+    name: launchEnv.TERM || "xterm-256color",
     cols: process.stdout.columns || 80,
     rows: process.stdout.rows || 24,
     cwd,
-    env: process.env
+    env: launchEnv
   });
   const outputSubscription = tui.onData((data) => process.stdout.write(data));
   let refreshRequested = false;
@@ -3621,7 +4478,7 @@ async function runInteractiveTui(command, args, refreshArgs, cwd, onAltI, onAltM
     outputSubscription.dispose();
   }
   if (refreshRequested) {
-    return runInteractiveTui(command, refreshArgs, refreshArgs, cwd, onAltI, onAltM, installRefresh);
+    return runInteractiveTui(command, refreshArgs, refreshArgs, cwd, onAltI, onAltM, installRefresh, protectedBossClient, launchEnv);
   }
   return exitCode;
 }
@@ -3634,7 +4491,7 @@ function cleanupOldCoiStateFiles(intercomDir, now = Date.now(), maxAgeMs = COI_S
   }
   for (const entry of entries) {
     if (!/^coi-.+-state\.json$/.test(entry)) continue;
-    const path = join7(intercomDir, entry);
+    const path = join8(intercomDir, entry);
     try {
       const stat = statSync(path);
       if (now - stat.mtimeMs > maxAgeMs) rmSync(path, { force: true });
@@ -3645,11 +4502,17 @@ function cleanupOldCoiStateFiles(intercomDir, now = Date.now(), maxAgeMs = COI_S
 function resetCoiStateForFreshStart(statePath, fresh) {
   if (fresh) rmSync(statePath, { force: true });
 }
-async function runCoi(options) {
+async function runCoi(options, env = process.env) {
+  const bossClient = parseHardenedBossClientKind(env.CODEX_INTERCOM_BOSS_CLIENT?.trim(), "CODEX_INTERCOM_BOSS_CLIENT");
+  assertHardenedBossProviderAuthority(bossClient);
+  if (bossClient !== void 0 && options.codexCommand !== "codex") {
+    throw new Error(`${bossClient} cannot use a caller-provided Codex/app-server command`);
+  }
+  const runtimeConfig = assertHardenedBossCoiLaunch(options.codexArgs, options.cwd, bossClient);
   if (hasCodexHelpOrVersion(options.codexArgs)) {
     const help = spawn4(options.codexCommand, options.codexArgs, {
       cwd: options.cwd,
-      env: process.env,
+      env,
       stdio: "inherit"
     });
     const [code, signal] = await once2(help, "exit");
@@ -3662,18 +4525,30 @@ async function runCoi(options) {
   const name = options.name ?? identity.name;
   const intercomDir = getIntercomDirPath();
   cleanupOldCoiStateFiles(intercomDir);
-  const socketPath = options.socketPath ?? join7(intercomDir, `coi-${process.pid}.sock`);
-  const statePath = options.statePath ?? join7(intercomDir, `coi-${sanitizeSegment(id)}-state.json`);
-  const fresh = process.env.AGENT_INTERCOM_FRESH === "1";
+  const socketPath = options.socketPath ?? join8(intercomDir, `coi-${process.pid}.sock`);
+  const statePath = options.statePath ?? join8(intercomDir, `coi-${sanitizeSegment(id)}-state.json`);
+  const fresh = env.AGENT_INTERCOM_FRESH === "1";
   resetCoiStateForFreshStart(statePath, fresh);
   rmSync(socketPath, { force: true });
-  const appServer = spawn4(options.codexCommand, buildCodexAppServerArgs(options.codexArgs, socketPath), {
+  const resumeRequest = resolveCoiResumeRequest(options.codexArgs);
+  const agent = {
+    id,
+    name,
     cwd: options.cwd,
-    env: process.env,
+    model: env.CODEX_INTERCOM_MODEL,
+    instructions: options.instructions,
+    threadId: fresh ? void 0 : resumeRequest.threadId,
+    ...bossClient === void 0 ? {} : { bossClient },
+    ...runtimeConfig
+  };
+  assertHardenedBossAgentConfig(agent);
+  const appServer = spawn4(options.codexCommand, buildCodexAppServerArgs(options.codexArgs, socketPath, env), {
+    cwd: options.cwd,
+    env,
     stdio: ["ignore", "ignore", "pipe"]
   });
   appServer.stderr?.on("data", (chunk) => {
-    if (process.env.CODEX_INTERCOM_DEBUG) process.stderr.write(String(chunk));
+    if (env.CODEX_INTERCOM_DEBUG) process.stderr.write(String(chunk));
   });
   const cleanup = async () => {
     await daemon?.stop().catch(() => void 0);
@@ -3694,22 +4569,13 @@ async function runCoi(options) {
     void cleanupOnce().finally(() => process.exit(143));
   });
   await waitForSocket(socketPath, appServer);
-  const resumeRequest = resolveCoiResumeRequest(options.codexArgs);
   const config = {
     statePath,
     appServer: {
       transport: "unix-websocket",
       socketPath
     },
-    agents: [{
-      id,
-      name,
-      cwd: options.cwd,
-      model: process.env.CODEX_INTERCOM_MODEL,
-      instructions: options.instructions,
-      threadId: fresh ? void 0 : resumeRequest.threadId,
-      ...deriveBridgeAgentRuntimeConfig(options.codexArgs, options.cwd)
-    }]
+    agents: [agent]
   };
   let refreshVisibleTui;
   daemon = new CodexBridgeDaemon(config, {
@@ -3745,7 +4611,7 @@ async function runCoi(options) {
     copying = true;
     void daemon.getContactTargetForAgent(id).then(async (contact) => {
       const instruction = formatContactInstruction(contact);
-      const preferTerminal = Boolean(process.env.SSH_TTY || process.env.SSH_CONNECTION);
+      const preferTerminal = Boolean(env.SSH_TTY || env.SSH_CONNECTION);
       let copied = preferTerminal ? copyTextToTerminalClipboard(instruction, (sequence) => process.stdout.write(sequence)) : await copyTextToClipboard(instruction);
       if (!copied.ok && process.stdout.isTTY) {
         copied = copyTextToTerminalClipboard(instruction, (sequence) => process.stdout.write(sequence));
@@ -3778,7 +4644,9 @@ async function runCoi(options) {
         return () => {
           if (refreshVisibleTui === refresh) refreshVisibleTui = void 0;
         };
-      }
+      },
+      bossClient,
+      env
     );
   } finally {
     await cleanupOnce();
@@ -3797,6 +4665,7 @@ if (process.argv[1] && (basename2(process.argv[1]) === "coi.ts" || basename2(pro
   });
 }
 export {
+  assertHardenedBossCoiLaunch,
   buildCodexAppServerArgs,
   buildCoiTuiArgs,
   cleanupOldCoiStateFiles,
@@ -3807,6 +4676,7 @@ export {
   resetCoiStateForFreshStart,
   resolveCoiResumeRequest,
   runCoi,
+  runInteractiveTui,
   sanitizeSegment,
   splitCodexResumeArgs
 };

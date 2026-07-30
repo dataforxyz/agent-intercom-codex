@@ -2,7 +2,10 @@ import net from "net";
 import { existsSync, readFileSync, renameSync, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
+import { types as nodeUtilTypes } from "node:util";
 import { authorize, POLICY_SEMANTICS_HASH, POLICY_SEMANTICS_VERSION, type PolicyAction, type PolicyState } from "@dataforxyz/agent-intercom-core";
+import type { BossAuthorizationContext, BossControlEnvelope, BossPolicyAction } from "@dataforxyz/agent-intercom-core/boss";
+import { canonicalHash } from "@dataforxyz/agent-intercom-core/canonical";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import {
   ensureIntercomRuntimeDir,
@@ -25,7 +28,22 @@ import { writeDurableJson } from "../durable-json.ts";
 import { acquireBrokerOwnership, hasBrokerOwnership, releaseBrokerOwnership } from "./ownership.ts";
 import { RemoteAccessRegistry, type RemotePrincipalMetadata, type RemotePrincipalRecord } from "./access-registry.ts";
 import { authorizeSessionAction, visibleSessions } from "./authorization.ts";
+import {
+  assertBossControlSender,
+  bossCapabilityAdvertisement,
+  bossControlKind,
+  exactBossSessionTarget,
+  hasAuthoritativeBossControlCorrelation,
+  parseExactRegistrationFrame,
+  parseBossParticipantRegistrationMetadata,
+} from "./boss-adapter.ts";
 import { BrokerAuditLog } from "./audit.ts";
+import {
+  BossControlResultLedger,
+  bossControlAcceptedRecoveryFrames,
+  bossControlReplayFrames,
+  type BossControlResult,
+} from "./boss-control-ledger.ts";
 import type {
   AskCancellationReason,
   BrokerErrorCode,
@@ -33,6 +51,7 @@ import type {
   DeliveryFailureCode,
   Message,
   Attachment,
+  BossControlFailureCode,
   SessionInfo,
   SessionRegistration,
   RemotePrincipalSummary,
@@ -48,6 +67,7 @@ const ASK_STATE_PATH = getBrokerAskStateFilePath(INTERCOM_DIR);
 const ACCESS_STATE_PATH = getBrokerAccessStateFilePath(INTERCOM_DIR);
 const ADMIN_CREDENTIAL_PATH = getBrokerAdminCredentialFilePath(INTERCOM_DIR);
 const AUDIT_PATH = getBrokerAuditFilePath(INTERCOM_DIR);
+const BOSS_CONTROL_LEDGER_PATH = join(INTERCOM_DIR, "boss-control-results.json");
 const BROKER_STATE_ID = randomUUID();
 const MAX_SESSIONS = 128;
 const MAX_UNREGISTERED_CONNECTIONS = 32;
@@ -123,6 +143,20 @@ interface PendingDelivery {
   action: PolicyAction;
   fromGeneration: number;
   toGeneration: number;
+  timeout: NodeJS.Timeout;
+}
+
+interface PendingBossControl {
+  deliveryId: string;
+  key: string;
+  fingerprint: string;
+  requestId: string;
+  messageId: string;
+  envelope: BossControlEnvelope;
+  from: string;
+  to: string;
+  senderSocket: net.Socket;
+  recipientSocket: net.Socket;
   timeout: NodeJS.Timeout;
 }
 
@@ -240,6 +274,14 @@ function isSessionRegistration(value: unknown): value is SessionRegistration {
     return false;
   }
 
+  if (session.boss !== undefined) {
+    try {
+      parseBossParticipantRegistrationMetadata(session.boss);
+    } catch {
+      return false;
+    }
+  }
+
   if (session.name !== undefined && (typeof session.name !== "string" || session.name.length > MAX_SESSION_NAME_LENGTH)) {
     return false;
   }
@@ -273,6 +315,8 @@ class IntercomBroker {
   private pendingDeliveries = new Map<string, PendingDelivery>();
   private pendingDeliveryKeys = new Map<string, string>();
   private recentDeliveries = new Map<string, RecentDelivery>();
+  private pendingBossControls = new Map<string, PendingBossControl>();
+  private pendingBossControlKeys = new Map<string, string>();
   private connections = new Set<net.Socket>();
   private unregisteredConnections = new Set<net.Socket>();
   private server: net.Server;
@@ -282,12 +326,14 @@ class IntercomBroker {
   private readonly askTimeoutMs = getAskTimeoutMs();
   private readonly accessRegistry: RemoteAccessRegistry;
   private readonly audit: BrokerAuditLog;
+  private readonly bossControlLedger: BossControlResultLedger;
 
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
     acquireBrokerOwnership(OWNER_PATH);
     this.accessRegistry = new RemoteAccessRegistry(ACCESS_STATE_PATH);
     this.audit = new BrokerAuditLog(AUDIT_PATH);
+    this.bossControlLedger = new BossControlResultLedger(BOSS_CONTROL_LEDGER_PATH);
     this.accessRegistry.ensureAdminCredential(ADMIN_CREDENTIAL_PATH);
     this.loadAskEdges();
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
@@ -492,6 +538,38 @@ class IntercomBroker {
     writeMessage(socket, { type: "delivery_failed", messageId, accepted, code, reason });
   }
 
+  private sendBossControlFailure(
+    socket: net.Socket,
+    requestId: string,
+    messageId: string,
+    idempotencyKey: string,
+    code: BossControlFailureCode,
+    reason: string,
+    deliveryId?: string,
+    ledgerBinding?: { scope: string; fingerprint: string },
+    acknowledgeAcceptedRecovery = false,
+  ): void {
+    const result: BossControlResult = {
+      type: "boss_control_result",
+      requestId,
+      messageId,
+      idempotencyKey,
+      status: "rejected",
+      delivered: false,
+      code,
+      reason,
+      ...(deliveryId === undefined ? {} : { deliveryId }),
+    };
+    if (ledgerBinding) {
+      this.bossControlLedger.recordTerminal(ledgerBinding.scope, ledgerBinding.fingerprint, result);
+    }
+    if (acknowledgeAcceptedRecovery) {
+      for (const frame of bossControlAcceptedRecoveryFrames(result)) writeMessage(socket, frame);
+    } else {
+      writeMessage(socket, result);
+    }
+  }
+
   private scheduleShutdownCheck(): void {
     if (this.shutdownTimer) return;
 
@@ -511,9 +589,16 @@ class IntercomBroker {
     currentId: string | null,
     setId: (id: string | null) => void,
   ): void {
-    if (typeof msg !== "object" || msg === null || !("type" in msg) || typeof msg.type !== "string") {
+    if (typeof msg !== "object" || msg === null || nodeUtilTypes.isProxy(msg)) {
       throw new Error("Invalid client message");
     }
+    const typeDescriptor = Object.getOwnPropertyDescriptor(msg, "type");
+    if (
+      typeDescriptor === undefined
+      || !typeDescriptor.enumerable
+      || !Object.hasOwn(typeDescriptor, "value")
+      || typeof typeDescriptor.value !== "string"
+    ) throw new Error("Invalid client message");
 
     const clientMessage = msg as { type: string } & Record<string, unknown>;
     const requiresEndpointAuth = typeof LISTEN_TARGET !== "string";
@@ -533,6 +618,9 @@ class IntercomBroker {
         version: INTERCOM_PROTOCOL_VERSION,
         endpoint: origin,
         remoteAccess: this.remoteAccessContract(),
+        ...(bossCapabilityAdvertisement() === undefined
+          ? {}
+          : { capabilities: bossCapabilityAdvertisement() }),
       });
       return;
     }
@@ -563,8 +651,17 @@ class IntercomBroker {
 
     switch (clientMessage.type) {
       case "register": {
+        try {
+          parseExactRegistrationFrame(clientMessage);
+        } catch (error) {
+          this.sendError(socket, "BOSS_CONTRACT_MISMATCH", error instanceof Error ? error.message : "Registration contract is invalid");
+          socket.end();
+          break;
+        }
         if (!isSessionRegistration(clientMessage.session)) {
-          throw new Error("Invalid register message");
+          this.sendError(socket, "BOSS_CONTRACT_MISMATCH", "Registration session contract is invalid");
+          socket.end();
+          break;
         }
 
         if (
@@ -582,6 +679,22 @@ class IntercomBroker {
 
         if (currentId) {
           throw new Error("Received duplicate register message");
+        }
+
+        if (clientMessage.session.boss !== undefined) {
+          // Stage B publishes the exact registration contract without
+          // activating it on the legacy user-owned broker. No credential is
+          // consumed and no binding is trusted before the protected service
+          // predicates make an advertisement possible.
+          if (origin !== "local") {
+            this.sendError(socket, "ACCESS_DENIED", "Boss participants require the protected local broker endpoint");
+          } else if (bossCapabilityAdvertisement() === undefined) {
+            this.sendError(socket, "BOSS_FEATURE_UNAVAILABLE", "boss-run-v1 is not advertised by this broker");
+          } else {
+            this.sendError(socket, "BOSS_FEATURE_UNAVAILABLE", "Boss participant credential binding is not installed");
+          }
+          socket.end();
+          break;
         }
         
         let id: string;
@@ -999,6 +1112,162 @@ class IntercomBroker {
         }
 
         this.sendDeliveryFailure(socket, message.id, false, "SESSION_NOT_FOUND", "Session not found");
+        break;
+      }
+
+      case "boss_control": {
+        if (!currentId) throw new Error("Received boss_control before register");
+        const requestId = clientMessage.requestId;
+        const requestedTarget = clientMessage.to;
+        if (
+          typeof requestId !== "string"
+          || requestId.length === 0
+          || requestId.length > MAX_MESSAGE_ID_LENGTH
+          || typeof requestedTarget !== "string"
+          || requestedTarget.length === 0
+          || requestedTarget.length > MAX_TARGET_LENGTH
+        ) throw new Error("Invalid boss_control routing metadata");
+
+        const sender = this.sessions.get(currentId);
+        let envelope: BossControlEnvelope;
+        let controlKind: ReturnType<typeof bossControlKind>["controlKind"];
+        try {
+          if (!sender || sender.socket !== socket) throw new Error("Boss sender session not found");
+          envelope = assertBossControlSender(sender.info, clientMessage.envelope);
+          controlKind = bossControlKind(envelope).controlKind;
+          if (requestId !== envelope.messageId) {
+            throw new Error("requestId must equal the canonical Boss envelope messageId");
+          }
+        } catch (error) {
+          // The envelope may be an outer or nested Proxy rejected by the
+          // adapter preflight. Never inspect it again on the failure path.
+          this.sendBossControlFailure(
+            socket,
+            requestId,
+            requestId,
+            requestId,
+            "INVALID_CONTROL",
+            error instanceof Error ? error.message : "Invalid Boss control envelope",
+          );
+          break;
+        }
+
+        const key = this.bossControlKey(currentId, envelope);
+        const fingerprint = this.bossControlFingerprint(requestedTarget, envelope);
+        const prior = this.bossControlLedger.lookup(key, fingerprint);
+        if (prior.status === "replay") {
+          for (const frame of bossControlReplayFrames(prior.result, envelope.messageId)) writeMessage(socket, frame);
+          break;
+        }
+        if (prior.status === "conflict") {
+          this.sendBossControlFailure(
+            socket,
+            requestId,
+            envelope.messageId,
+            envelope.idempotencyKey,
+            "IDEMPOTENCY_CONFLICT",
+            "Boss idempotency key is durably bound to a different canonical request",
+          );
+          break;
+        }
+
+        // Boss routing is identity-bearing: names and ID prefixes are never
+        // accepted. The protected provider must supply durable causation
+        // evidence before this dormant adapter may claim correlation.
+        const exactTarget = exactBossSessionTarget(this.sessions, requestedTarget);
+        const correlated = hasAuthoritativeBossControlCorrelation();
+        const target = exactTarget && authorizeSessionAction(
+          Array.from(this.sessions.values(), (session) => session.info),
+          currentId,
+          "control",
+          exactTarget.info.id,
+          { controlKind, correlated },
+        ).allowed ? exactTarget : undefined;
+        if (!target) {
+          const acceptedDeliveryId = prior.status === "accepted" ? prior.deliveryId : undefined;
+          this.sendBossControlFailure(
+            socket,
+            requestId,
+            envelope.messageId,
+            envelope.idempotencyKey,
+            exactTarget ? "POLICY_DENIED" : "SESSION_NOT_FOUND",
+            exactTarget
+              ? "Boss control routing requires authoritative correlation evidence"
+              : "Boss control target session ID was not found",
+            acceptedDeliveryId,
+            { scope: key, fingerprint },
+            acceptedDeliveryId !== undefined,
+          );
+          break;
+        }
+        const existingDeliveryId = this.pendingBossControlKeys.get(key);
+        if (existingDeliveryId) {
+          const existing = this.pendingBossControls.get(existingDeliveryId);
+          if (!existing || existing.fingerprint !== fingerprint) {
+            this.sendBossControlFailure(socket, requestId, envelope.messageId, envelope.idempotencyKey, "IDEMPOTENCY_CONFLICT", "Boss idempotency key is already bound to a different canonical request");
+            break;
+          }
+          if (existing.messageId !== envelope.messageId) {
+            existing.requestId = requestId;
+            existing.messageId = envelope.messageId;
+            existing.envelope = envelope;
+            existing.senderSocket = socket;
+            writeMessage(existing.recipientSocket, { type: "boss_control", deliveryId: existing.deliveryId, from: sender.info, envelope });
+          }
+          writeMessage(socket, {
+            type: "boss_control_ack",
+            requestId,
+            messageId: envelope.messageId,
+            idempotencyKey: envelope.idempotencyKey,
+            status: "accepted",
+            deliveryId: existing.deliveryId,
+          });
+          break;
+        }
+        const deliveryId = prior.status === "accepted" ? prior.deliveryId : randomUUID();
+        if (prior.status === "miss") {
+          this.bossControlLedger.recordAccepted(key, fingerprint, deliveryId);
+        }
+        const timeout = setTimeout(() => {
+          this.failPendingBossControl(deliveryId, "DELIVERY_TIMEOUT", "Recipient did not acknowledge the Boss control envelope in time");
+        }, DELIVERY_ACK_TIMEOUT_MS);
+        timeout.unref?.();
+        this.pendingBossControls.set(deliveryId, {
+          deliveryId,
+          key,
+          fingerprint,
+          requestId,
+          messageId: envelope.messageId,
+          envelope,
+          from: currentId,
+          to: target.info.id,
+          senderSocket: socket,
+          recipientSocket: target.socket,
+          timeout,
+        });
+        this.pendingBossControlKeys.set(key, deliveryId);
+        writeMessage(socket, {
+          type: "boss_control_ack",
+          requestId,
+          messageId: envelope.messageId,
+          idempotencyKey: envelope.idempotencyKey,
+          status: "accepted",
+          deliveryId,
+        });
+        writeMessage(target.socket, { type: "boss_control", deliveryId, from: sender.info, envelope });
+        break;
+      }
+
+      case "boss_control_received": {
+        if (!currentId) throw new Error("Received boss_control_received before register");
+        if (
+          typeof clientMessage.deliveryId !== "string"
+          || typeof clientMessage.messageId !== "string"
+          || typeof clientMessage.idempotencyKey !== "string"
+        ) {
+          throw new Error("Invalid boss_control_received message");
+        }
+        this.acknowledgePendingBossControl(clientMessage.deliveryId, clientMessage.messageId, clientMessage.idempotencyKey, currentId, socket);
         break;
       }
 
@@ -1504,13 +1773,19 @@ class IntercomBroker {
     }
   }
 
-  private isAuthorized(actorId: string, action: PolicyAction, targetId: string): boolean {
+  private isAuthorized(
+    actorId: string,
+    action: PolicyAction | BossPolicyAction,
+    targetId: string,
+    bossContext?: BossAuthorizationContext,
+  ): boolean {
     if (!this.isCurrentPrincipal(actorId) || !this.isCurrentPrincipal(targetId)) return false;
     return authorizeSessionAction(
       Array.from(this.sessions.values(), (session) => session.info),
       actorId,
       action,
       targetId,
+      bossContext,
     ).allowed;
   }
 
@@ -1739,6 +2014,109 @@ class IntercomBroker {
     return count;
   }
 
+  private bossControlKey(fromSessionId: string, envelope: BossControlEnvelope): string {
+    return canonicalHash("agent-intercom-codex/boss-control/idempotency-scope/v1", {
+      fromSessionId,
+      bossRunId: envelope.bossRunId,
+      participantId: envelope.participantId,
+      bindingEpoch: Number(envelope.bindingEpoch),
+      idempotencyKey: envelope.idempotencyKey,
+    });
+  }
+
+  private bossControlFingerprint(toSessionId: string, envelope: BossControlEnvelope): string {
+    const { messageId: _transportMessageId, ...stableEnvelope } = envelope;
+    return canonicalHash("agent-intercom-codex/boss-control/request/v1", { toSessionId, envelope: stableEnvelope });
+  }
+
+  private acknowledgePendingBossControl(
+    deliveryId: string,
+    messageId: string,
+    idempotencyKey: string,
+    sessionId: string,
+    socket: net.Socket,
+  ): void {
+    const pending = this.pendingBossControls.get(deliveryId);
+    if (
+      !pending
+      || pending.to !== sessionId
+      || pending.recipientSocket !== socket
+      || pending.messageId !== messageId
+      || pending.envelope.idempotencyKey !== idempotencyKey
+    ) return;
+    const sender = this.sessions.get(pending.from);
+    const recipient = this.sessions.get(pending.to);
+    const { controlKind } = bossControlKind(pending.envelope);
+    if (
+      !sender
+      || !recipient
+      || !authorizeSessionAction(
+        Array.from(this.sessions.values(), (session) => session.info),
+        pending.from,
+        "control",
+        pending.to,
+        { controlKind, correlated: hasAuthoritativeBossControlCorrelation() },
+      ).allowed
+    ) {
+      this.failPendingBossControl(deliveryId, "POLICY_DENIED", "Boss control authorization changed before acknowledgement");
+      return;
+    }
+    if (sender.socket === pending.senderSocket) {
+      const result: BossControlResult = {
+        type: "boss_control_result",
+        requestId: pending.requestId,
+        messageId: pending.messageId,
+        idempotencyKey: pending.envelope.idempotencyKey,
+        status: "delivered",
+        deliveryId,
+        delivered: true,
+      };
+      this.bossControlLedger.recordTerminal(pending.key, pending.fingerprint, result);
+      clearTimeout(pending.timeout);
+      this.pendingBossControls.delete(deliveryId);
+      this.pendingBossControlKeys.delete(pending.key);
+      writeMessage(sender.socket, result);
+    }
+  }
+
+  private failPendingBossControl(
+    deliveryId: string,
+    code: BossControlFailureCode,
+    reason: string,
+  ): void {
+    const pending = this.pendingBossControls.get(deliveryId);
+    if (!pending) return;
+    const sender = this.sessions.get(pending.from);
+    const result: BossControlResult = {
+      type: "boss_control_result",
+      requestId: pending.requestId,
+      messageId: pending.messageId,
+      idempotencyKey: pending.envelope.idempotencyKey,
+      status: "rejected",
+      delivered: false,
+      code,
+      reason,
+      deliveryId,
+    };
+    this.bossControlLedger.recordTerminal(pending.key, pending.fingerprint, result);
+    clearTimeout(pending.timeout);
+    this.pendingBossControls.delete(deliveryId);
+    this.pendingBossControlKeys.delete(pending.key);
+    if (sender?.socket === pending.senderSocket) writeMessage(sender.socket, result);
+  }
+
+  private clearPendingBossControlsForSession(sessionId: string, socket: net.Socket): void {
+    for (const pending of Array.from(this.pendingBossControls.values())) {
+      if (pending.to === sessionId && pending.recipientSocket === socket) {
+        this.failPendingBossControl(pending.deliveryId, "RECIPIENT_DISCONNECTED", "Boss control recipient disconnected before acknowledgement");
+      } else if (pending.from === sessionId && pending.senderSocket === socket) {
+        clearTimeout(pending.timeout);
+        this.pendingBossControls.delete(pending.deliveryId);
+        this.pendingBossControlKeys.delete(pending.key);
+      }
+    }
+  }
+
   private acknowledgePendingDelivery(deliveryId: string, sessionId: string, socket: net.Socket): void {
     const pending = this.pendingDeliveries.get(deliveryId);
     if (!pending || pending.to !== sessionId || pending.recipientSocket !== socket) {
@@ -1817,6 +2195,7 @@ class IntercomBroker {
   }
 
   private clearPendingDeliveriesForSession(sessionId: string, socket: net.Socket): void {
+    this.clearPendingBossControlsForSession(sessionId, socket);
     for (const delivery of Array.from(this.pendingDeliveries.values())) {
       if (delivery.to === sessionId && delivery.recipientSocket === socket) {
         this.failPendingDelivery(delivery.id, "RECIPIENT_DISCONNECTED", "Recipient disconnected before acknowledging the message");
@@ -1867,6 +2246,11 @@ class IntercomBroker {
     }
     this.pendingDeliveries.clear();
     this.pendingDeliveryKeys.clear();
+    for (const pending of this.pendingBossControls.values()) {
+      clearTimeout(pending.timeout);
+    }
+    this.pendingBossControls.clear();
+    this.pendingBossControlKeys.clear();
     for (const edge of this.askEdges.values()) {
       clearTimeout(edge.timeout);
     }

@@ -56,6 +56,23 @@ appear in the already-open terminal instead of existing only in the saved
 transcript. This refresh happens after the turn is idle so Codex does not reopen
 in a phantom `Working` state. Retryable app-server stream errors are reported as reconnecting without terminating the sidecar, allowing Codex's own retry to complete. Orchestrated `fresh: true` launches remove the saved `coi` thread state before registration.
 
+The additive Stage-B `boss-run-v1` adapter contracts are present but dormant.
+Ordinary local and remote-access communication continues to use the existing
+protocol-v3 behavior when Boss metadata is omitted. The legacy broker does not
+advertise or bind Boss participants until a protected provider supplies all of
+the required broker identity, credential-registry, authority-transition, and
+participant-health predicates. Boss-scoped discovery and routing fail closed
+across ordinary sessions and other Boss runs. The `boss_participant` and
+`boss_reviewer` launch-profile markers make production Codex launches fail
+with `PROVIDER_AUTHORITY_UNAVAILABLE`: this adapter has no broker-owned,
+artifact-attested provider executable and therefore never resolves protected
+launches through caller `PATH`. Their non-spawning parser validators still
+reject disabled approvals and `danger-full-access`, and reviewers remain
+read-only. The markers do not install or advertise a restricted operation client.
+Restricted Boss operation clients are not advertised or exported yet. They
+remain unavailable until the protected broker can provision both the binding
+and transport through a non-caller-forgeable factory.
+
 ## Install
 
 For normal use, install the package so the command-line entry points are on

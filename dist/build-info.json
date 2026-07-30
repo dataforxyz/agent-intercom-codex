@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "package": "@dataforxyz/agent-intercom-codex",
   "version": "0.10.0",
-  "sourceSha256": "28cbe04c291ec9ca89e519b437e41d7a7c359f85cf99d2fcf3e6cb0f74dcee2c",
+  "sourceSha256": "e3924d8a81ca3579d920e6938f77fe75f36c8eeb02d45b49b2d940b7a67b6410",
   "targets": [
     "codex-server",
     "broker",
