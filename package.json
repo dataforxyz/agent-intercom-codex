@@ -20,8 +20,12 @@
     "!codex/**/*.test.ts",
     "broker/**/*.ts",
     "!broker/**/*.test.ts",
+    "provider/protected-service.ts",
+    "provider/provider.mjs",
+    "!provider/entry.ts",
     "scripts/**/*",
     "!scripts/**/*.test.mjs",
+    "!scripts/build-protected-provider.mjs",
     "skills/**/*",
     "types.ts",
     "config.ts",
@@ -40,11 +44,13 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:protected-provider": "node scripts/build-protected-provider.mjs",
+    "prepack": "npm run build:protected-provider",
     "prepare": "npm run build",
     "codex:mcp": "tsx codex/server.ts",
     "codex:bridge": "tsx codex/bridge-daemon.ts",
     "coi": "tsx codex/coi.ts",
-    "test": "node --import tsx --test broker/*.test.ts boss-control-outbox.test.ts outbound-outbox.test.ts codex/*.test.ts scripts/*.test.mjs",
+    "test": "node --import tsx --test broker/*.test.ts boss-control-outbox.test.ts outbound-outbox.test.ts codex/*.test.ts provider/*.test.ts scripts/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
